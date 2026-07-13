@@ -198,12 +198,8 @@ class OnnxRuntimeEngine:
         if prediction.shape != raw.shape or not np.isfinite(prediction).all():
             raise GpuRuntimeError("ONNX 模型输出形状无效或包含 NaN/无穷值")
         model_output = prediction[0].transpose(1, 2, 0).astype(np.float32, copy=False)
-        alpha = min(1.0, request.strength)
-        blended = request.packed.astype(np.float32, copy=False) + alpha * (
-            model_output - request.packed.astype(np.float32, copy=False)
-        )
         return DenoiseResult(
-            packed=np.clip(blended, 0.0, 1.0).astype(np.float32, copy=False),
+            packed=np.clip(model_output, 0.0, 1.0).astype(np.float32, copy=False),
             engine=self.info,
             stats=EngineRunStats(inference_seconds=elapsed, tile_size=height),
         )
