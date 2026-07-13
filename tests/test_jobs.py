@@ -52,3 +52,41 @@ def test_legacy_duplicate_outputs_are_migrated(tmp_path: Path):
     jobs = JobStore(database).list()
     assert jobs[0].output_path.name == "same.dng"
     assert jobs[1].output_path.name == "same_2.dng"
+
+
+def test_runtime_statistics_are_persisted(tmp_path: Path):
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    job = store.add(tmp_path / "a.ARW", tmp_path / "a.dng", mode="gpu")
+    updated = store.record_runtime(
+        job.id,
+        engine_id="onnx-pmrid",
+        model_version="1.0.0",
+        provider="CUDAExecutionProvider",
+        tile_size=1024,
+        inference_seconds=3.75,
+        fallback_reason=None,
+    )
+    assert updated.engine_id == "onnx-pmrid"
+    assert updated.model_version == "1.0.0"
+    assert updated.provider == "CUDAExecutionProvider"
+    assert updated.tile_size == 1024
+    assert updated.inference_seconds == pytest.approx(3.75)
+
+
+def test_legacy_database_is_migrated_with_empty_runtime_statistics(tmp_path: Path):
+    database = tmp_path / "legacy.sqlite3"
+    with sqlite3.connect(database) as db:
+        db.execute(
+            """CREATE TABLE jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, source_path TEXT NOT NULL, output_path TEXT NOT NULL,
+            state TEXT NOT NULL, mode TEXT NOT NULL, parameters_json TEXT NOT NULL, error TEXT,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"""
+        )
+        db.execute(
+            "INSERT INTO jobs(source_path, output_path, state, mode, parameters_json, created_at, updated_at) "
+            "VALUES('a.ARW', 'a.dng', 'queued', 'cpu', '{}', 'now', 'now')"
+        )
+    job = JobStore(database).list()[0]
+    assert job.engine_id is None
+    assert job.provider is None
+    assert job.inference_seconds is None

@@ -36,6 +36,12 @@ class Job:
     mode: str
     parameters: dict
     error: str | None
+    engine_id: str | None
+    model_version: str | None
+    provider: str | None
+    tile_size: int | None
+    inference_seconds: float | None
+    fallback_reason: str | None
     created_at: str
     updated_at: str
 
@@ -79,8 +85,24 @@ class JobStore:
                 """
             )
             db.execute("CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state, id)")
+            self._migrate_runtime_columns(db)
             self._repair_duplicate_outputs(db)
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_output_path ON jobs(output_path)")
+
+    @staticmethod
+    def _migrate_runtime_columns(db: sqlite3.Connection) -> None:
+        existing = {str(row[1]) for row in db.execute("PRAGMA table_info(jobs)").fetchall()}
+        columns = {
+            "engine_id": "TEXT",
+            "model_version": "TEXT",
+            "provider": "TEXT",
+            "tile_size": "INTEGER",
+            "inference_seconds": "REAL",
+            "fallback_reason": "TEXT",
+        }
+        for name, sql_type in columns.items():
+            if name not in existing:
+                db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {sql_type}")
 
     @staticmethod
     def _repair_duplicate_outputs(db: sqlite3.Connection) -> None:
@@ -116,12 +138,20 @@ class JobStore:
             mode=row["mode"],
             parameters=json.loads(row["parameters_json"]),
             error=row["error"],
+            engine_id=row["engine_id"],
+            model_version=row["model_version"],
+            provider=row["provider"],
+            tile_size=int(row["tile_size"]) if row["tile_size"] is not None else None,
+            inference_seconds=(
+                float(row["inference_seconds"]) if row["inference_seconds"] is not None else None
+            ),
+            fallback_reason=row["fallback_reason"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
 
     def add(self, source: Path, output: Path, mode: str = "auto", parameters: dict | None = None) -> Job:
-        if mode not in {"auto", "extreme", "cpu"}:
+        if mode not in {"auto", "gpu", "cpu", "extreme"}:
             raise ValueError("未知处理模式")
         now = _now()
         with self._connect() as db:
@@ -193,6 +223,40 @@ class JobStore:
             updated = db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
         assert updated is not None
         return self._row(updated)
+
+    def record_runtime(
+        self,
+        job_id: int,
+        *,
+        engine_id: str,
+        model_version: str | None,
+        provider: str,
+        tile_size: int | None,
+        inference_seconds: float,
+        fallback_reason: str | None,
+    ) -> Job:
+        if inference_seconds < 0:
+            raise ValueError("推理耗时不能为负数")
+        with self._connect() as db:
+            cursor = db.execute(
+                """UPDATE jobs SET engine_id = ?, model_version = ?, provider = ?, tile_size = ?,
+                inference_seconds = ?, fallback_reason = ?, updated_at = ? WHERE id = ?""",
+                (
+                    engine_id,
+                    model_version,
+                    provider,
+                    tile_size,
+                    inference_seconds,
+                    fallback_reason,
+                    _now(),
+                    job_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(job_id)
+            row = db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        assert row is not None
+        return self._row(row)
 
     def recover_interrupted(self) -> int:
         with self._connect() as db:
