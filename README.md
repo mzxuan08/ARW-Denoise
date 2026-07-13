@@ -1,42 +1,40 @@
-# ARW Denoise
+﻿# ARW Denoise 0.2.0
 
-面向 Sony A7C II 的开源 Bayer RAW 批量降噪桌面软件。项目当前处于首个可运行垂直切片：已经包含持久化任务队列、RAW 探测接口、Bayer 数值管线、CPU 小波基线、dnglab 兼容转换适配器和 PySide6 GUI 骨架。
+面向 Sony A7C II（ILCE-7CM2）的完整离线 Bayer RAW 批量降噪软件。使用开源 PMRID 神经网络和 ONNX Runtime CUDA，输出保留 CFA、白平衡、色彩元数据和传感器高光余量的可编辑 DNG。
 
-> 重要：当前版本已实现保守的“无压缩基础 DNG + CFA 像素平面安全替换”路径，但尚未用真实 A7C II ARW 在 Adobe 与像素蛋糕中完成外部验收。`dng-convert` 只用于建立未经降噪的兼容基线；`process-cpu` 才会执行 CPU Bayer 降噪。软件不会把 RGB 图像伪装成 RAW DNG。
+## 使用发布包
 
-## 开发运行
+1. 完整解压 `ArwDenoise-0.2.0-offline-win64.zip`，不要只单独拖出 EXE。
+2. 双击 `ArwDenoise.exe`。首次启动会自动执行一次真实 GPU 推理自检。
+3. 在设置中选择默认导入目录，并选择“源目录 / DNG_Denoised”或固定导出目录。
+4. 添加任意数量的 ARW 或整个文件夹，保持“全自动（推荐）”后开始处理。
+5. 完成后点“打开导出目录”，或选中任务后点“定位选中 DNG”。
 
-```powershell
-python -m pip install -e ".[dev,raw,gui]"
-python -m arw_denoise --help
-python -m arw_denoise gui
-```
+高级设置默认折叠。只有勾选“启用手动高级参数”时，四个滑块才会覆盖基于 ISO 和 RAW 噪声估计的自动结果。自动模式优先使用 NVIDIA GPU；GPU 不可用时会记录原因并回退到保守 CPU 引擎。
 
-探测一张 ARW：
+## 运行要求
 
-```powershell
-python -m arw_denoise probe path\to\image.ARW
-```
+- Windows 10/11 x64。
+- 支持 CUDA 12 运行时的 NVIDIA 驱动。不需要安装 Python、CUDA Toolkit、cuDNN 或联网。
+- 当前正式校验机型为 Sony A7C II；其他相机不会被默认猜测处理。
+- 完整解压后约需 2.7 GB 空间。
 
-使用已安装的 dnglab 建立兼容 DNG：
+PMRID 是通用 Bayer RAW 基线，不是 Sony 或 Adobe 的商业模型。请先用随包的 A7C II 验收 DNG 在 Adobe Camera Raw/Lightroom 或像素蛋糕中确认你的工作流。
 
-```powershell
-python -m arw_denoise dng-convert input.ARW output.DNG
-```
-
-安装 dnglab Windows 辅助程序并运行 CPU 降噪：
+## 开发与验证
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/fetch_dnglab.ps1
-python -m arw_denoise process-cpu input.ARW output_DN.DNG --dnglab vendor/dnglab/dnglab.exe
+python -m pip install -e ".[dev,raw,gui,gpu]"
+arw-denoise gpu-probe
+python -m pytest
+python scripts/stress_queue.py --count 150
 ```
 
-## 安全约束
+构建和隔离验证：
 
-- 源 ARW 只读。
-- 输出先写临时文件，再原子改名。
-- 不静默覆盖已有文件。
-- 缺少关键 RAW 元数据时拒绝处理。
-- 单张任务失败不会破坏队列数据库。
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1
+powershell -ExecutionPolicy Bypass -File scripts/verify_offline_bundle.ps1 -Distribution dist/ArwDenoise
+```
 
-完整设计和实施计划位于 `docs/superpowers/`。
+源 ARW 始终只读；输出先写临时文件再发布，不静默覆盖旧文件。任务队列持久化，单任务失败不会阻断其他照片。
