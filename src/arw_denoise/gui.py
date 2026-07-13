@@ -1,24 +1,41 @@
 from __future__ import annotations
 
-from pathlib import Path
 import threading
 import time
+from pathlib import Path
 
 from .config import AppPaths
-from .jobs import JobStore
 from .dnglab import DngLabClient
-from .processor import CpuRawProcessor, ProcessingSettings
+from .gpu_probe import create_default_gpu_probe
+from .gui_helpers import job_parameters, open_in_explorer
+from .jobs import Job, JobStore
+from .processor import AutoProcessingSettings, SmartRawProcessor
+from .settings import AppSettings, SettingsStore, resolve_output_dir
 
 
 def run_gui() -> int:
     try:
         from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
         from PySide6.QtWidgets import (
-            QApplication, QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow,
-            QMessageBox, QPushButton, QSlider, QSplitter, QVBoxLayout, QWidget, QComboBox,
+            QApplication,
+            QCheckBox,
+            QComboBox,
+            QFileDialog,
+            QHBoxLayout,
+            QLabel,
+            QLineEdit,
+            QListWidget,
+            QListWidgetItem,
+            QMainWindow,
+            QMessageBox,
+            QPushButton,
+            QSlider,
+            QSplitter,
+            QVBoxLayout,
+            QWidget,
         )
     except ImportError as exc:
-        raise RuntimeError("缺少 PySide6；请安装 arw-denoise[gui]") from exc
+        raise RuntimeError("缺少 PySide6，请安装 arw-denoise[gui]") from exc
 
     class ProcessingWorker(QObject):
         updated = Signal()
@@ -34,7 +51,7 @@ def run_gui() -> int:
         @Slot()
         def run(self) -> None:
             try:
-                processor = CpuRawProcessor(dnglab=DngLabClient())
+                processor = SmartRawProcessor(dnglab=DngLabClient())
                 for job in self.store.list("queued"):
                     if self.cancel_requested.is_set():
                         self.store.transition(job.id, "cancelled")
@@ -54,8 +71,27 @@ def run_gui() -> int:
                             self.store.transition(job.id, name)
                             self.updated.emit()
 
-                        strength = float(job.parameters.get("strength", 1.0))
-                        processor.process(job.source_path, job.output_path, ProcessingSettings(strength=strength), phase)
+                        mode = "gpu" if job.mode == "extreme" else job.mode
+                        allowed = {
+                            key: value
+                            for key, value in job.parameters.items()
+                            if key in {"strength", "chroma_noise", "detail_protection", "artifact_suppression"}
+                        }
+                        result = processor.process(
+                            job.source_path,
+                            job.output_path,
+                            AutoProcessingSettings(mode=mode, **allowed),
+                            on_phase=phase,
+                        )
+                        self.store.record_runtime(
+                            job.id,
+                            engine_id=result.engine.engine_id,
+                            model_version=result.engine.model_version,
+                            provider=result.engine.provider,
+                            tile_size=result.stats.tile_size,
+                            inference_seconds=result.stats.inference_seconds,
+                            fallback_reason=result.fallback_reason,
+                        )
                         self.store.transition(job.id, "validating")
                         self.store.transition(job.id, "completed")
                     except Exception as exc:
@@ -79,29 +115,47 @@ def run_gui() -> int:
             self.cancel_requested.set()
             self.pause_requested.clear()
 
+    class ProbeWorker(QObject):
+        completed = Signal(object)
+        failed = Signal(str)
+        finished = Signal()
+
+        @Slot()
+        def run(self) -> None:
+            try:
+                self.completed.emit(create_default_gpu_probe().run(force=True))
+            except Exception as exc:
+                self.failed.emit(str(exc))
+            finally:
+                self.finished.emit()
+
     class MainWindow(QMainWindow):
         def __init__(self) -> None:
             super().__init__()
-            self.setWindowTitle("ARW Denoise")
-            self.resize(1180, 720)
-            paths = AppPaths.default()
-            paths.ensure()
-            self.store = JobStore(paths.database)
+            self.setWindowTitle("ARW Denoise · 离线 RAW 降噪")
+            self.resize(1260, 780)
+            self.paths = AppPaths.default()
+            self.paths.ensure()
+            self.store = JobStore(self.paths.database)
             self.store.recover_interrupted()
+            self.settings_store = SettingsStore(self.paths.settings)
+            self.settings = self.settings_store.load()
             self.thread = None
             self.worker = None
+            self.probe_thread = None
+            self.probe_worker = None
             self._close_after_processing = False
 
             splitter = QSplitter()
             splitter.addWidget(self._sources_panel())
             splitter.addWidget(self._queue_panel())
             splitter.addWidget(self._settings_panel())
-            splitter.setSizes([230, 650, 300])
+            splitter.setSizes([250, 650, 360])
 
             bottom = QHBoxLayout()
             self.summary = QLabel()
             bottom.addWidget(self.summary, 1)
-            self.start_button = QPushButton("开始")
+            self.start_button = QPushButton("开始处理")
             self.start_button.clicked.connect(self.start_processing)
             bottom.addWidget(self.start_button)
             self.pause_button = QPushButton("暂停")
@@ -123,7 +177,9 @@ def run_gui() -> int:
             widget = QWidget()
             widget.setLayout(root)
             self.setCentralWidget(widget)
+            self._load_settings_into_controls()
             self.refresh()
+            QTimer.singleShot(250, self.probe_gpu)
 
         def _sources_panel(self):
             panel = QWidget()
@@ -140,6 +196,12 @@ def run_gui() -> int:
             retry = QPushButton("重试失败任务")
             retry.clicked.connect(self.retry_failed)
             layout.addWidget(retry)
+            open_output = QPushButton("打开导出目录")
+            open_output.clicked.connect(self.open_output_folder)
+            layout.addWidget(open_output)
+            locate = QPushButton("定位选中 DNG")
+            locate.clicked.connect(self.locate_selected_output)
+            layout.addWidget(locate)
             layout.addStretch(1)
             return panel
 
@@ -150,74 +212,288 @@ def run_gui() -> int:
             title.setStyleSheet("font-size: 18px; font-weight: 600")
             layout.addWidget(title)
             self.queue = QListWidget()
+            self.queue.itemDoubleClicked.connect(lambda _item: self.locate_selected_output())
             layout.addWidget(self.queue)
             return panel
+
+        def _path_row(self, edit: QLineEdit, button_text: str, handler) -> QWidget:
+            widget = QWidget()
+            row = QHBoxLayout(widget)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.addWidget(edit, 1)
+            button = QPushButton(button_text)
+            button.clicked.connect(handler)
+            row.addWidget(button)
+            return widget
 
         def _settings_panel(self):
             panel = QWidget()
             layout = QVBoxLayout(panel)
-            title = QLabel("降噪设置")
+            title = QLabel("设置")
             title.setStyleSheet("font-size: 18px; font-weight: 600")
             layout.addWidget(title)
+
+            layout.addWidget(QLabel("处理引擎"))
             self.mode = QComboBox()
-            self.mode.addItems(["CPU 兼容（当前可用）"])
+            self.mode.addItem("全自动（推荐）", "auto")
+            self.mode.addItem("强制 NVIDIA GPU", "gpu")
+            self.mode.addItem("CPU 兼容", "cpu")
             layout.addWidget(self.mode)
+
+            self.gpu_status = QLabel("GPU：正在检测…")
+            self.gpu_status.setWordWrap(True)
+            layout.addWidget(self.gpu_status)
+            self.gpu_probe_button = QPushButton("重新检测 GPU")
+            self.gpu_probe_button.clicked.connect(self.probe_gpu)
+            layout.addWidget(self.gpu_probe_button)
+
+            layout.addWidget(QLabel("默认导入目录"))
+            self.import_dir = QLineEdit()
+            layout.addWidget(self._path_row(self.import_dir, "选择", self.choose_import_dir))
+            layout.addWidget(QLabel("导出策略"))
+            self.output_strategy = QComboBox()
+            self.output_strategy.addItem("源目录 / DNG_Denoised", "source_subfolder")
+            self.output_strategy.addItem("固定导出目录", "fixed")
+            layout.addWidget(self.output_strategy)
+            self.output_dir = QLineEdit()
+            layout.addWidget(self._path_row(self.output_dir, "选择", self.choose_output_dir))
+
+            self.advanced_toggle = QPushButton("高级设置 ▸")
+            self.advanced_toggle.setCheckable(True)
+            self.advanced_toggle.toggled.connect(self._toggle_advanced)
+            layout.addWidget(self.advanced_toggle)
+            self.advanced_panel = QWidget()
+            advanced = QVBoxLayout(self.advanced_panel)
+            advanced.setContentsMargins(0, 0, 0, 0)
+            self.advanced_enabled = QCheckBox("启用手动高级参数（不勾选则保持全自动）")
+            advanced.addWidget(self.advanced_enabled)
             self.sliders = {}
-            for index, label in enumerate(("降噪强度", "彩色噪点（GPU 版本）", "细节保护（GPU 版本）", "伪影抑制（GPU 版本）")):
-                layout.addWidget(QLabel(label))
+            specs = (
+                ("strength", "降噪强度", 0, 200, 50),
+                ("chroma_noise", "彩色噪点", 0, 100, 50),
+                ("detail_protection", "细节保护", 0, 100, 82),
+                ("artifact_suppression", "伪影抑制", 0, 100, 50),
+            )
+            for key, label, minimum, maximum, value in specs:
+                caption = QLabel()
                 slider = QSlider(Qt.Horizontal)
-                slider.setRange(0, 100)
-                slider.setValue(50)
-                slider.setEnabled(index == 0)
-                self.sliders[label] = slider
-                layout.addWidget(slider)
-            note = QLabel("当前版本使用保守的 CPU Bayer 小波基线并输出无压缩 CFA DNG；正式使用前仍需完成 A7C II 的 Adobe/像素蛋糕兼容测试。")
+                slider.setRange(minimum, maximum)
+                slider.setValue(value)
+                slider.valueChanged.connect(lambda current, c=caption, name=label: c.setText(f"{name}：{current / 100:.2f}"))
+                caption.setText(f"{label}：{value / 100:.2f}")
+                advanced.addWidget(caption)
+                advanced.addWidget(slider)
+                self.sliders[key] = slider
+            layout.addWidget(self.advanced_panel)
+            note = QLabel("默认由 ISO 和 RAW 噪声估计自动调节。输出为保留 CFA、白平衡和高光余量的可编辑 DNG。")
             note.setWordWrap(True)
-            note.setStyleSheet("color: #777; margin-top: 16px")
+            note.setStyleSheet("color: #777; margin-top: 12px")
             layout.addWidget(note)
             layout.addStretch(1)
             return panel
 
+        def _load_settings_into_controls(self) -> None:
+            index = self.mode.findData(self.settings.engine_mode)
+            self.mode.setCurrentIndex(max(0, index))
+            self.import_dir.setText(self.settings.default_import_dir or "")
+            self.output_dir.setText(self.settings.default_output_dir or "")
+            index = self.output_strategy.findData(self.settings.output_strategy)
+            self.output_strategy.setCurrentIndex(max(0, index))
+            self.advanced_toggle.setChecked(self.settings.advanced_expanded)
+            self.advanced_enabled.setChecked(self.settings.advanced_enabled)
+            defaults = {"strength": 0.5, "chroma_noise": 0.5, "detail_protection": 0.82, "artifact_suppression": 0.5}
+            for key, slider in self.sliders.items():
+                value = getattr(self.settings, key)
+                slider.setValue(round(100 * (defaults[key] if value is None else value)))
+            self._toggle_advanced(self.settings.advanced_expanded)
+            self.mode.currentIndexChanged.connect(self.save_settings)
+            self.output_strategy.currentIndexChanged.connect(self._output_strategy_changed)
+            self.import_dir.editingFinished.connect(self.save_settings)
+            self.output_dir.editingFinished.connect(self.save_settings)
+            self.advanced_enabled.toggled.connect(self.save_settings)
+            for slider in self.sliders.values():
+                slider.sliderReleased.connect(self.save_settings)
+
+        def _current_settings(self) -> AppSettings:
+            return AppSettings(
+                default_import_dir=self.import_dir.text().strip() or None,
+                default_output_dir=self.output_dir.text().strip() or None,
+                output_strategy=str(self.output_strategy.currentData()),
+                engine_mode=str(self.mode.currentData()),
+                advanced_expanded=self.advanced_toggle.isChecked(),
+                advanced_enabled=self.advanced_enabled.isChecked(),
+                strength=self.sliders["strength"].value() / 100,
+                chroma_noise=self.sliders["chroma_noise"].value() / 100,
+                detail_protection=self.sliders["detail_protection"].value() / 100,
+                artifact_suppression=self.sliders["artifact_suppression"].value() / 100,
+            )
+
+        @Slot()
+        def save_settings(self, *_args) -> None:
+            try:
+                self.settings = self._current_settings()
+                self.settings_store.save(self.settings)
+            except (OSError, ValueError) as exc:
+                self.statusBar().showMessage(f"无法保存设置：{exc}", 8000)
+
+        def _toggle_advanced(self, expanded: bool) -> None:
+            self.advanced_panel.setVisible(expanded)
+            self.advanced_toggle.setText("高级设置 ▾" if expanded else "高级设置 ▸")
+            if hasattr(self, "settings_store"):
+                self.save_settings()
+
+        def _output_strategy_changed(self, *_args) -> None:
+            if self.output_strategy.currentData() == "fixed" and not self.output_dir.text().strip():
+                self.choose_output_dir()
+                if not self.output_dir.text().strip():
+                    self.output_strategy.setCurrentIndex(self.output_strategy.findData("source_subfolder"))
+            self.save_settings()
+
+        def choose_import_dir(self) -> None:
+            start = self.import_dir.text().strip() or str(Path.home())
+            selected = QFileDialog.getExistingDirectory(self, "选择默认导入目录", start)
+            if selected:
+                self.import_dir.setText(selected)
+                self.save_settings()
+
+        def choose_output_dir(self) -> None:
+            start = self.output_dir.text().strip() or self.import_dir.text().strip() or str(Path.home())
+            selected = QFileDialog.getExistingDirectory(self, "选择固定导出目录", start)
+            if selected:
+                self.output_dir.setText(selected)
+                self.output_strategy.setCurrentIndex(self.output_strategy.findData("fixed"))
+                self.save_settings()
+
+        def _selected_job(self) -> Job | None:
+            item = self.queue.currentItem()
+            if item is None:
+                return None
+            try:
+                return self.store.get(int(item.data(Qt.UserRole)))
+            except (KeyError, TypeError, ValueError):
+                return None
+
         def _enqueue(self, paths: list[Path]) -> None:
             if not paths:
                 return
-            output_dir = paths[0].parent / "DNG_Denoised"
-            strength = self.sliders["降噪强度"].value() / 50.0
+            self.import_dir.setText(str(paths[0].parent.resolve()))
+            self.save_settings()
+            settings = self._current_settings()
+            parameters = job_parameters(settings)
             for path in paths:
-                self.store.add_with_available_output(path, output_dir, mode="cpu", parameters={"strength": strength})
+                self.store.add_with_available_output(
+                    path,
+                    resolve_output_dir(path, settings),
+                    mode=settings.engine_mode,
+                    parameters=parameters,
+                )
             self.refresh()
 
         def add_files(self) -> None:
-            files, _ = QFileDialog.getOpenFileNames(self, "选择 Sony ARW", "", "Sony RAW (*.ARW *.arw)")
+            start = self.import_dir.text().strip()
+            files, _ = QFileDialog.getOpenFileNames(self, "选择 Sony ARW", start, "Sony RAW (*.ARW *.arw)")
             self._enqueue([Path(value) for value in files])
 
         def add_folder(self) -> None:
-            folder = QFileDialog.getExistingDirectory(self, "选择包含 ARW 的文件夹")
+            start = self.import_dir.text().strip()
+            folder = QFileDialog.getExistingDirectory(self, "选择包含 ARW 的文件夹", start)
             if not folder:
                 return
-            files = sorted(Path(folder).glob("*.ARW")) + sorted(Path(folder).glob("*.arw"))
+            root = Path(folder)
+            files = sorted({*root.glob("*.ARW"), *root.glob("*.arw")})
             if not files:
                 QMessageBox.information(self, "未找到文件", "所选文件夹中没有 ARW 文件。")
                 return
             self._enqueue(files)
 
+        def open_output_folder(self) -> None:
+            try:
+                job = self._selected_job()
+                if job is not None:
+                    folder = job.output_path.parent
+                else:
+                    settings = self._current_settings()
+                    source = settings.import_path or Path.home()
+                    folder = resolve_output_dir(source / "placeholder.ARW", settings)
+                folder.mkdir(parents=True, exist_ok=True)
+                open_in_explorer(folder)
+            except (OSError, ValueError) as exc:
+                QMessageBox.warning(self, "无法打开", str(exc))
+
+        def locate_selected_output(self) -> None:
+            job = self._selected_job()
+            if job is None:
+                QMessageBox.information(self, "未选择任务", "请先选中一个已完成任务。")
+                return
+            try:
+                open_in_explorer(job.output_path, select_file=True)
+            except (OSError, ValueError) as exc:
+                QMessageBox.warning(self, "无法定位", str(exc))
+
         def refresh(self) -> None:
             jobs = self.store.list()
+            selected = self._selected_job()
+            selected_id = selected.id if selected else None
             self.queue.clear()
+            states = {"queued": "等待", "decoding": "解码", "denoising": "降噪", "writing": "写入", "validating": "验证", "completed": "完成", "failed": "失败", "cancelled": "已取消"}
             for job in jobs:
-                item = QListWidgetItem(f"#{job.id}  [{job.state}]  {job.source_path.name}  →  {job.output_path.name}")
+                detail = ""
+                if job.provider:
+                    detail = f"  · {job.provider} · {job.inference_seconds or 0:.2f}s"
+                    if job.tile_size:
+                        detail += f" · tile {job.tile_size}"
+                if job.fallback_reason:
+                    detail += " · GPU 已回退 CPU"
+                text = f"#{job.id}  [{states.get(job.state, job.state)}]  {job.source_path.name}  →  {job.output_path.name}{detail}"
                 if job.error:
-                    item.setToolTip(job.error)
-                    item.setText(f"{item.text()}  ·  {job.error}")
+                    text += f"  ·  {job.error}"
+                item = QListWidgetItem(text)
+                item.setData(Qt.UserRole, job.id)
+                item.setToolTip(job.error or job.fallback_reason or str(job.output_path))
                 self.queue.addItem(item)
-            self.summary.setText(f"共 {len(jobs)} 张 · 等待 {sum(job.state == 'queued' for job in jobs)} 张")
+                if job.id == selected_id:
+                    self.queue.setCurrentItem(item)
+            queued = sum(job.state == "queued" for job in jobs)
+            self.summary.setText(f"共 {len(jobs)} 张 · 等待 {queued} 张（队列无数量限制）")
             running = self.thread is not None and self.thread.isRunning()
-            self.start_button.setEnabled(not running and any(job.state == "queued" for job in jobs))
+            self.start_button.setEnabled(not running and queued > 0)
 
         def retry_failed(self) -> None:
             for job in self.store.list("failed"):
                 self.store.transition(job.id, "queued")
             self.refresh()
+
+        def probe_gpu(self) -> None:
+            if self.probe_thread is not None and self.probe_thread.isRunning():
+                return
+            self.gpu_probe_button.setEnabled(False)
+            self.gpu_status.setText("GPU：正在执行真实 CUDA 推理自检…")
+            self.probe_thread = QThread(self)
+            self.probe_worker = ProbeWorker()
+            self.probe_worker.moveToThread(self.probe_thread)
+            self.probe_thread.started.connect(self.probe_worker.run)
+            self.probe_worker.completed.connect(self._gpu_probe_completed)
+            self.probe_worker.failed.connect(lambda message: self.gpu_status.setText(f"GPU：不可用 · {message}"))
+            self.probe_worker.finished.connect(self.probe_thread.quit)
+            self.probe_worker.finished.connect(self.probe_worker.deleteLater)
+            self.probe_thread.finished.connect(self._probe_finished)
+            self.probe_thread.finished.connect(self.probe_thread.deleteLater)
+            self.probe_thread.start()
+
+        @Slot(object)
+        def _gpu_probe_completed(self, result) -> None:
+            if result.success:
+                self.gpu_status.setText(
+                    f"GPU：{result.device_name} · {result.provider} · PMRID {result.model_version} · 自检 {result.inference_seconds:.2f}s"
+                )
+            else:
+                self.gpu_status.setText(f"GPU：不可用 · {result.error}")
+
+        @Slot()
+        def _probe_finished(self) -> None:
+            self.probe_worker = None
+            self.probe_thread = None
+            self.gpu_probe_button.setEnabled(True)
 
         def start_processing(self) -> None:
             if self.thread is not None and self.thread.isRunning():
@@ -278,6 +554,12 @@ def run_gui() -> int:
                 self.statusBar().showMessage("正在安全结束当前照片，请稍候…")
                 event.ignore()
                 return
+            if self.probe_thread is not None and self.probe_thread.isRunning():
+                self.statusBar().showMessage("正在完成 GPU 自检，请稍候…")
+                QTimer.singleShot(250, self.close)
+                event.ignore()
+                return
+            self.save_settings()
             event.accept()
 
     app = QApplication.instance() or QApplication([])

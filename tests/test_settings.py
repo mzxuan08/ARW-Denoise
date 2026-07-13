@@ -23,6 +23,7 @@ def test_settings_round_trip_chinese_paths_and_advanced_values(tmp_path: Path) -
         output_strategy="fixed",
         engine_mode="gpu",
         advanced_expanded=True,
+        advanced_enabled=True,
         strength=0.8,
         chroma_noise=0.6,
         detail_protection=0.9,

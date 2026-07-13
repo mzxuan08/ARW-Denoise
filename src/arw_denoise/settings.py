@@ -19,6 +19,7 @@ class AppSettings:
     output_strategy: str = "source_subfolder"
     engine_mode: str = "auto"
     advanced_expanded: bool = False
+    advanced_enabled: bool = False
     strength: float | None = None
     chroma_noise: float | None = None
     detail_protection: float | None = None
