@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "artifact": {
     "file": "pmrid-fp16.onnx",
-    "sha256": "c785511029e11a647e69e8dcdfa22107c2d6b5f3a6fbc9247622b594d437d31e",
+    "sha256": "34bf0b58b31566eee3ca8b3f99f3a6e000188ca6f510081d0de8355cc5a6cff0",
     "format": "onnx",
     "precision": "fp16"
   },
@@ -57,7 +57,7 @@
       1
     ],
     "range": [
-      100.0,
+      400.0,
       25600.0
     ]
   },

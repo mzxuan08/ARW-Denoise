@@ -44,8 +44,8 @@ def test_auto_tune_increases_equivalent_iso_and_strength_with_noise() -> None:
 def test_auto_tune_combines_exif_iso_without_exceeding_model_bounds() -> None:
     low = tune_automatic(_noisy(0.015), _metadata(100))
     high = tune_automatic(_noisy(0.015), _metadata(102400))
-    assert 100.0 <= low.effective_iso <= 25600.0
-    assert 100.0 <= high.effective_iso <= 25600.0
+    assert 400.0 <= low.effective_iso <= 25600.0
+    assert 400.0 <= high.effective_iso <= 25600.0
     assert high.effective_iso > low.effective_iso
 
 
@@ -70,4 +70,3 @@ def test_auto_tune_records_version_and_safe_ranges() -> None:
     assert 0.0 <= config.chroma_noise <= 1.0
     assert 0.0 <= config.detail_protection <= 1.0
     assert 0.0 <= config.artifact_suppression <= 1.0
-

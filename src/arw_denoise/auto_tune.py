@@ -41,12 +41,15 @@ def tune_automatic(packed: np.ndarray, metadata: RawMetadata | None = None) -> A
     if exif_iso is not None and exif_iso > 0:
         bounded_exif = _clamp(float(exif_iso), 100.0, 25600.0)
         # Blend in log space because ISO and shot noise are multiplicative scales.
-        effective_iso = math.exp(0.65 * math.log(bounded_exif) + 0.35 * math.log(noise_iso))
+        control_iso = math.exp(0.65 * math.log(bounded_exif) + 0.35 * math.log(noise_iso))
     else:
-        effective_iso = noise_iso
-    effective_iso = _clamp(effective_iso, 100.0, 25600.0)
+        control_iso = noise_iso
+    control_iso = _clamp(control_iso, 100.0, 25600.0)
+    # PMRID's half-precision ISO transform can overflow on high-contrast tiles
+    # below this equivalent domain. Strength still follows the true control ISO.
+    effective_iso = _clamp(control_iso, 400.0, 25600.0)
 
-    stops = _clamp(math.log2(effective_iso / 100.0), 0.0, 8.0)
+    stops = _clamp(math.log2(control_iso / 100.0), 0.0, 8.0)
     confidence = _clamp(float(estimate.confidence), 0.0, 1.0)
     base_strength = 0.35 + 0.10 * stops
     strength = _clamp(base_strength * (0.70 + 0.30 * confidence), 0.20, 1.20)
@@ -68,4 +71,3 @@ def tune_automatic(packed: np.ndarray, metadata: RawMetadata | None = None) -> A
         noise_sigma=estimate.sigma,
         confidence=confidence,
     )
-

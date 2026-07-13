@@ -52,7 +52,7 @@ def _write_manifest(root: Path, **changes: object) -> Path:
             "name": "effective_iso",
             "dtype": "float32",
             "shape": ["N", 1, 1, 1],
-            "range": [100.0, 25600.0],
+            "range": [400.0, 25600.0],
         },
         "runtime": {
             "minimum_onnxruntime": "1.23.2",
@@ -152,4 +152,4 @@ def test_bundled_manifest_schema_is_valid_without_loading_binary() -> None:
     manifest = load_manifest(ROOT / "models" / "pmrid" / "manifest.json", verify_artifact=False)
     assert manifest.model_id == "pmrid-general-raw"
     assert manifest.source.commit == "8ebb9e8e96559881dee957f34243933c5beb77dd"
-    assert manifest.artifact.sha256 == "c785511029e11a647e69e8dcdfa22107c2d6b5f3a6fbc9247622b594d437d31e"
+    assert manifest.artifact.sha256 == "34bf0b58b31566eee3ca8b3f99f3a6e000188ca6f510081d0de8355cc5a6cff0"

@@ -82,7 +82,7 @@ class PmridInferenceModel(nn.Module):
         return conversion_k, conversion_b
 
     def forward(self, raw: torch.Tensor, effective_iso: torch.Tensor) -> torch.Tensor:
-        iso = torch.clamp(effective_iso, 100.0, 25600.0)
+        iso = torch.clamp(effective_iso, 400.0, 25600.0)
         conversion_k, conversion_b = self._noise_parameters(iso)
         normalized = (
             (raw * self.SENSOR_SCALE * conversion_k + conversion_b)
@@ -128,8 +128,8 @@ def export_models(
     wrapper = _load_wrapper(checkpoint.resolve(), expected_checkpoint_sha256)
 
     generator = torch.Generator(device="cpu").manual_seed(20260714)
-    raw = torch.rand((2, 4, sample_height, sample_width), generator=generator, dtype=torch.float32)
-    iso = torch.tensor([[[[1600.0]]], [[[25600.0]]]], dtype=torch.float32)
+    raw = torch.rand((3, 4, sample_height, sample_width), generator=generator, dtype=torch.float32)
+    iso = torch.tensor([[[[400.0]]], [[[1600.0]]], [[[25600.0]]]], dtype=torch.float32)
     with torch.inference_mode():
         reference = wrapper(raw, iso).numpy()
 
@@ -220,7 +220,7 @@ def write_manifest(path: Path, result: ExportResult) -> None:
             "name": "effective_iso",
             "dtype": "float32",
             "shape": ["N", 1, 1, 1],
-            "range": [100.0, 25600.0],
+            "range": [400.0, 25600.0],
         },
         "runtime": {
             "minimum_onnxruntime": "1.23.2",
