@@ -62,7 +62,7 @@ $pyInstallerArgs = @(
     "--noconfirm", "--clean", "--windowed", "--noupx",
     "--name", "ArwDenoise",
     "--collect-all", "rawpy",
-    "--collect-all", "onnxruntime",
+    "--collect-binaries", "onnxruntime",
     "--hidden-import", "onnxruntime.capi._pybind_state",
     "--exclude-module", "torch",
     "--add-binary", "$dnglab;tools",
