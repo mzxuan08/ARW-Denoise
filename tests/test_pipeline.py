@@ -24,6 +24,23 @@ def test_pack_unpack_is_lossless_for_unchanged_values():
     np.testing.assert_array_equal(restored, pixels)
 
 
+def test_unpack_can_restore_sensor_values_outside_nominal_black_white_range():
+    info = metadata()
+    object.__setattr__(info, "white_level", 15360)
+    pixels = np.full((8, 12), 2048, dtype=np.uint16)
+    pixels[0, 0] = 128
+    pixels[0, 1] = 16000
+    pixels[1, 0] = 15361
+    packed, context = pack_normalized_bayer(pixels, info)
+
+    restored = unpack_normalized_bayer(packed, context, reference_pixels=pixels)
+
+    assert restored[0, 0] == 128
+    assert restored[0, 1] == 16000
+    assert restored[1, 0] == 15361
+    assert restored[2, 2] == 2048
+
+
 def test_tiled_identity_has_no_seams():
     rng = np.random.default_rng(8)
     image = rng.random((73, 91, 4), dtype=np.float32)

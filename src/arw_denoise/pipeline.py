@@ -42,7 +42,12 @@ def pack_normalized_bayer(pixels: np.ndarray, metadata: RawMetadata) -> tuple[np
     return packed, context
 
 
-def unpack_normalized_bayer(packed: np.ndarray, context: NormalizationContext) -> np.ndarray:
+def unpack_normalized_bayer(
+    packed: np.ndarray,
+    context: NormalizationContext,
+    *,
+    reference_pixels: np.ndarray | None = None,
+) -> np.ndarray:
     if packed.ndim != 3 or packed.shape[-1] != 4:
         raise ValueError("packed Bayer 必须是 HxWx4")
     if not np.all(np.isfinite(packed)):
@@ -57,6 +62,15 @@ def unpack_normalized_bayer(packed: np.ndarray, context: NormalizationContext) -
     output[0::2, 1::2] = restored[:, :, 1]
     output[1::2, 0::2] = restored[:, :, 2]
     output[1::2, 1::2] = restored[:, :, 3]
+    if reference_pixels is not None:
+        if reference_pixels.shape != output.shape or not np.issubdtype(reference_pixels.dtype, np.integer):
+            raise ValueError("参考 Bayer 必须是与输出同尺寸的整数数组")
+        white = context.black_by_position + context.range_by_position
+        for position, (row, column) in enumerate(((0, 0), (0, 1), (1, 0), (1, 1))):
+            source_plane = reference_pixels[row::2, column::2]
+            output_plane = output[row::2, column::2]
+            protected = (source_plane < context.black_by_position[position]) | (source_plane > white[position])
+            output_plane[protected] = source_plane[protected].astype(context.dtype, copy=False)
     return output
 
 

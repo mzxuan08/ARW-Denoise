@@ -86,7 +86,7 @@ class CpuRawProcessor:
             tile_size=settings.tile_size,
             overlap=settings.overlap,
         )
-        restored = unpack_normalized_bayer(processed, context)
+        restored = unpack_normalized_bayer(processed, context, reference_pixels=frame.pixels)
         if on_phase:
             on_phase("writing")
         return self.dnglab.write_processed_cfa(source, output, restored, frame.metadata)
@@ -222,7 +222,7 @@ class SmartRawProcessor:
                 fallback_reason = str(exc)
                 denoised = self._run_cpu(packed, automatic, post, settings)
 
-        restored = unpack_normalized_bayer(denoised.packed, context)
+        restored = unpack_normalized_bayer(denoised.packed, context, reference_pixels=frame.pixels)
         if on_phase:
             on_phase("writing")
         dng_result = self.dnglab.write_processed_cfa(source, output, restored, frame.metadata)
