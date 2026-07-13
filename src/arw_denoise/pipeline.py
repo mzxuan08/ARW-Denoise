@@ -65,6 +65,7 @@ def tiled_inference(
     infer: Callable[[np.ndarray], np.ndarray],
     tile_size: int = 1024,
     overlap: int = 64,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> np.ndarray:
     """Run HWC inference with overlap-add blending and no hard seams."""
     if image.ndim != 3:
@@ -76,6 +77,8 @@ def tiled_inference(
         result = infer(image)
         if result.shape != image.shape:
             raise ValueError("模型输出尺寸与输入不一致")
+        if on_progress:
+            on_progress(1, 1)
         return result
 
     step = tile_size - overlap
@@ -83,11 +86,23 @@ def tiled_inference(
     weights = np.zeros((height, width, 1), dtype=np.float32)
     ramp = np.linspace(0.05, 1.0, overlap, dtype=np.float32) if overlap else np.ones(1, np.float32)
 
-    for top in range(0, height, step):
-        top = min(top, max(0, height - tile_size))
+    def starts(length: int) -> list[int]:
+        values: list[int] = []
+        for position in range(0, length, step):
+            adjusted = min(position, max(0, length - tile_size))
+            if not values or adjusted != values[-1]:
+                values.append(adjusted)
+            if adjusted + tile_size >= length:
+                break
+        return values
+
+    top_positions = starts(height)
+    left_positions = starts(width)
+    total = len(top_positions) * len(left_positions)
+    completed = 0
+    for top in top_positions:
         bottom = min(height, top + tile_size)
-        for left in range(0, width, step):
-            left = min(left, max(0, width - tile_size))
+        for left in left_positions:
             right = min(width, left + tile_size)
             tile = image[top:bottom, left:right]
             prediction = infer(tile)
@@ -105,9 +120,7 @@ def tiled_inference(
                     window[:, -overlap:] *= ramp[None, ::-1]
             output[top:bottom, left:right] += prediction.astype(np.float32) * window[:, :, None]
             weights[top:bottom, left:right] += window[:, :, None]
-            if right == width:
-                break
-        if bottom == height:
-            break
+            completed += 1
+            if on_progress:
+                on_progress(completed, total)
     return output / np.maximum(weights, 1e-8)
-

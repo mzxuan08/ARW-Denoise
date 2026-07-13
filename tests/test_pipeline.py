@@ -37,6 +37,20 @@ def test_tiled_inference_rejects_bad_shape():
         tiled_inference(image, lambda tile: tile[:, :-1], tile_size=32, overlap=8)
 
 
+def test_tiled_inference_reports_progress():
+    image = np.zeros((80, 80, 4), dtype=np.float32)
+    progress = []
+    tiled_inference(
+        image,
+        lambda tile: tile,
+        tile_size=48,
+        overlap=8,
+        on_progress=lambda completed, total: progress.append((completed, total)),
+    )
+    assert progress[-1][0] == progress[-1][1]
+    assert [item[0] for item in progress] == list(range(1, progress[-1][1] + 1))
+
+
 def test_metadata_rejects_non_bayer_color_layout():
     bad = metadata()
     object.__setattr__(bad, "cfa_pattern", (0, 0, 1, 2))
