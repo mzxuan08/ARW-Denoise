@@ -79,7 +79,32 @@ class JobStore:
                 """
             )
             db.execute("CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state, id)")
+            self._repair_duplicate_outputs(db)
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_output_path ON jobs(output_path)")
+
+    @staticmethod
+    def _repair_duplicate_outputs(db: sqlite3.Connection) -> None:
+        """Migrate pre-reservation databases without dropping queued work."""
+        duplicates = db.execute(
+            "SELECT output_path FROM jobs GROUP BY output_path HAVING COUNT(*) > 1"
+        ).fetchall()
+        if not duplicates:
+            return
+        reserved = {str(row[0]) for row in db.execute("SELECT output_path FROM jobs").fetchall()}
+        for duplicate in duplicates:
+            rows = db.execute(
+                "SELECT id, output_path FROM jobs WHERE output_path = ? ORDER BY id", (duplicate[0],)
+            ).fetchall()
+            original = Path(rows[0]["output_path"])
+            for row in rows[1:]:
+                index = 2
+                while True:
+                    candidate = original.with_name(f"{original.stem}_{index}{original.suffix}")
+                    if str(candidate) not in reserved and not candidate.exists():
+                        break
+                    index += 1
+                db.execute("UPDATE jobs SET output_path = ?, updated_at = ? WHERE id = ?", (str(candidate), _now(), row["id"]))
+                reserved.add(str(candidate))
 
     @staticmethod
     def _row(row: sqlite3.Row) -> Job:

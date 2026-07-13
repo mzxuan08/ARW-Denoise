@@ -50,8 +50,14 @@ class FakeCfaDngLab(FakeDngLab):
                 extratags=[
                     (33421, "H", 2, (2, 2), False),
                     (33422, "B", 4, (0, 1, 1, 2), False),
+                    (50713, "H", 2, (2, 2), False),
                     (50714, "H", 4, (512, 512, 512, 512), False),
                     (50717, "H", 1, 16383, False),
+                    (50719, "H", 2, (0, 0), False),
+                    (50720, "I", 2, (12, 8), False),
+                    (50721, "d", 9, (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0), False),
+                    (50728, "d", 3, (1.0, 1.0, 1.0), False),
+                    (50778, "H", 1, 21, False),
                 ],
             )
             return subprocess.CompletedProcess(args, 0, "converted", "")

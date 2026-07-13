@@ -1,4 +1,5 @@
 from pathlib import Path
+import sqlite3
 
 import pytest
 
@@ -34,3 +35,20 @@ def test_output_names_are_reserved_before_files_exist(tmp_path: Path):
     second = store.add_with_available_output(tmp_path / "two" / "same.ARW", tmp_path / "out")
     assert first.output_path.name == "same_DN.dng"
     assert second.output_path.name == "same_DN_2.dng"
+
+
+def test_legacy_duplicate_outputs_are_migrated(tmp_path: Path):
+    database = tmp_path / "legacy.sqlite3"
+    with sqlite3.connect(database) as db:
+        db.execute(
+            """CREATE TABLE jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, source_path TEXT NOT NULL, output_path TEXT NOT NULL,
+            state TEXT NOT NULL, mode TEXT NOT NULL, parameters_json TEXT NOT NULL, error TEXT,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"""
+        )
+        values = (str(tmp_path / "same.dng"), "queued", "cpu", "{}", "now", "now")
+        db.execute("INSERT INTO jobs(source_path, output_path, state, mode, parameters_json, created_at, updated_at) VALUES('a.ARW', ?, ?, ?, ?, ?, ?)", values)
+        db.execute("INSERT INTO jobs(source_path, output_path, state, mode, parameters_json, created_at, updated_at) VALUES('b.ARW', ?, ?, ?, ?, ?, ?)", values)
+    jobs = JobStore(database).list()
+    assert jobs[0].output_path.name == "same.dng"
+    assert jobs[1].output_path.name == "same_2.dng"

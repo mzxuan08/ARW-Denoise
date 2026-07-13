@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .domain import ExternalToolError, RawMetadata
-from .dngwrite import replace_cfa_pixels_in_place, validate_processed_dng
+from .dngwrite import replace_cfa_pixels_in_place, snapshot_dng_metadata, validate_processed_dng
 
 
 @dataclass(frozen=True)
@@ -131,7 +131,10 @@ class DngLabClient:
             if result.returncode != 0 or not temporary.is_file() or temporary.stat().st_size == 0:
                 message = (result.stderr or result.stdout).strip()
                 raise ExternalToolError(f"dnglab 基础 DNG 转换失败：{message}")
+            metadata_before = snapshot_dng_metadata(temporary)
             replace_cfa_pixels_in_place(temporary, processed_visible, metadata)
+            if snapshot_dng_metadata(temporary) != metadata_before:
+                raise ExternalToolError("写回 CFA 像素时 DNG 元数据发生变化")
             analysis = self.analyze(temporary)
             validate_processed_dng(temporary, processed_visible, metadata)
             self._publish_no_overwrite(temporary, output)
@@ -143,9 +146,12 @@ class DngLabClient:
     def _publish_no_overwrite(temporary: Path, output: Path) -> None:
         """Atomically publish on the same volume without replacing another process's file."""
         try:
-            os.link(temporary, output)
+            if os.name == "nt":
+                os.rename(temporary, output)
+            else:
+                os.link(temporary, output)
+                temporary.unlink()
         except FileExistsError as exc:
             raise ExternalToolError(f"发布时输出已存在：{output.name}") from exc
         except OSError as exc:
             raise ExternalToolError(f"无法原子发布 DNG：{exc}") from exc
-        temporary.unlink()

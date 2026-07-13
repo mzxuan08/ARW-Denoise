@@ -22,8 +22,14 @@ def test_replace_cfa_pixels_preserves_masked_border(tmp_path: Path):
         extratags=[
             (33421, "H", 2, (2, 2), False),
             (33422, "B", 4, (0, 1, 1, 2), False),
+            (50713, "H", 2, (2, 2), False),
             (50714, "H", 4, (512, 512, 512, 512), False),
             (50717, "H", 1, 16383, False),
+            (50719, "H", 2, (0, 0), False),
+            (50720, "I", 2, (10, 6), False),
+            (50721, "d", 9, (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0), False),
+            (50728, "d", 3, (1.0, 1.0, 1.0), False),
+            (50778, "H", 1, 21, False),
             (50829, "I", 4, (2, 2, 8, 12), False),
         ],
     )
@@ -48,7 +54,11 @@ def test_validation_rejects_wrong_pixels(tmp_path: Path):
         path, pixels, photometric=32803, compression=None, metadata=None,
         extratags=[
             (33421, "H", 2, (2, 2), False), (33422, "B", 4, (0, 1, 1, 2), False),
-            (50714, "H", 4, (512, 512, 512, 512), False), (50717, "H", 1, 16383, False),
+            (50713, "H", 2, (2, 2), False), (50714, "H", 4, (512, 512, 512, 512), False),
+            (50717, "H", 1, 16383, False), (50719, "H", 2, (0, 0), False),
+            (50720, "I", 2, (12, 8), False),
+            (50721, "d", 9, (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0), False),
+            (50728, "d", 3, (1.0, 1.0, 1.0), False), (50778, "H", 1, 21, False),
         ],
     )
     metadata = RawMetadata(

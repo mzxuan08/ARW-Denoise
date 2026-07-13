@@ -28,4 +28,8 @@ python -m PyInstaller `
     --add-data "$licenses;licenses" `
     (Join-Path $PSScriptRoot "launcher.py")
 
-Write-Output "Build complete: $(Join-Path $root 'dist\ArwDenoise\ArwDenoise.exe')"
+$distribution = Join-Path $root "dist\ArwDenoise"
+Copy-Item -LiteralPath $licenses -Destination (Join-Path $distribution "licenses") -Recurse -Force
+Copy-Item -LiteralPath (Join-Path $root "README.md") -Destination $distribution -Force
+Copy-Item -LiteralPath (Join-Path $root "THIRD_PARTY_NOTICES.md") -Destination $distribution -Force
+Write-Output "Build complete: $(Join-Path $distribution 'ArwDenoise.exe')"
