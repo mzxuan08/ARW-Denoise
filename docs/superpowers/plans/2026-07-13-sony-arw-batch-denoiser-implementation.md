@@ -11,7 +11,7 @@
 
 ### 任务 1.1 项目骨架
 
-创建 `pyproject.toml`、`src/arw_denoise/`、`tests/`、许可证、README 和开发命令。Python 最低版本定为 3.11。核心包不得在导入时强制加载 PySide6、rawpy 或 CUDA，以便测试和 CPU 环境运行。
+创建 `pyproject.toml`、`src/arw_denoise/`、`tests/`、许可证、README 和开发命令。Python 最低版本定为 3.10，以兼容当前 Windows 开发环境。核心包不得在导入时强制加载 PySide6、rawpy 或 CUDA，以便测试和 CPU 环境运行。
 
 验收：可执行 `python -m arw_denoise --help`；基础单元测试通过。
 

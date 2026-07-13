@@ -1,0 +1,153 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterator
+
+
+STATES = {"queued", "decoding", "denoising", "writing", "validating", "completed", "failed", "cancelled"}
+RUNNING_STATES = {"decoding", "denoising", "writing", "validating"}
+ALLOWED_TRANSITIONS = {
+    "queued": {"decoding", "cancelled"},
+    "decoding": {"denoising", "failed", "cancelled"},
+    "denoising": {"writing", "failed", "cancelled"},
+    "writing": {"validating", "failed", "cancelled"},
+    "validating": {"completed", "failed", "cancelled"},
+    "failed": {"queued", "cancelled"},
+    "cancelled": {"queued"},
+    "completed": {"queued"},
+}
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+@dataclass(frozen=True)
+class Job:
+    id: int
+    source_path: Path
+    output_path: Path
+    state: str
+    mode: str
+    parameters: dict
+    error: str | None
+    created_at: str
+    updated_at: str
+
+
+class JobStore:
+    def __init__(self, database: Path):
+        self.database = Path(database)
+        self.database.parent.mkdir(parents=True, exist_ok=True)
+        self._initialize()
+
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        connection = sqlite3.connect(self.database)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA journal_mode = WAL")
+        try:
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def _initialize(self) -> None:
+        with self._connect() as db:
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_path TEXT NOT NULL,
+                    output_path TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    parameters_json TEXT NOT NULL,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            db.execute("CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state, id)")
+
+    @staticmethod
+    def _row(row: sqlite3.Row) -> Job:
+        return Job(
+            id=int(row["id"]),
+            source_path=Path(row["source_path"]),
+            output_path=Path(row["output_path"]),
+            state=row["state"],
+            mode=row["mode"],
+            parameters=json.loads(row["parameters_json"]),
+            error=row["error"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def add(self, source: Path, output: Path, mode: str = "auto", parameters: dict | None = None) -> Job:
+        if mode not in {"auto", "extreme", "cpu"}:
+            raise ValueError("未知处理模式")
+        now = _now()
+        with self._connect() as db:
+            cursor = db.execute(
+                "INSERT INTO jobs(source_path, output_path, state, mode, parameters_json, created_at, updated_at) VALUES(?, ?, 'queued', ?, ?, ?, ?)",
+                (str(Path(source).resolve()), str(Path(output).resolve()), mode, json.dumps(parameters or {}, ensure_ascii=False), now, now),
+            )
+            row = db.execute("SELECT * FROM jobs WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        assert row is not None
+        return self._row(row)
+
+    def get(self, job_id: int) -> Job:
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if row is None:
+            raise KeyError(job_id)
+        return self._row(row)
+
+    def list(self, state: str | None = None) -> list[Job]:
+        if state is not None and state not in STATES:
+            raise ValueError("未知任务状态")
+        with self._connect() as db:
+            if state is None:
+                rows = db.execute("SELECT * FROM jobs ORDER BY id").fetchall()
+            else:
+                rows = db.execute("SELECT * FROM jobs WHERE state = ? ORDER BY id", (state,)).fetchall()
+        return [self._row(row) for row in rows]
+
+    def transition(self, job_id: int, new_state: str, error: str | None = None) -> Job:
+        if new_state not in STATES:
+            raise ValueError("未知任务状态")
+        with self._connect() as db:
+            row = db.execute("SELECT state FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            current = row["state"]
+            if new_state not in ALLOWED_TRANSITIONS[current]:
+                raise ValueError(f"非法状态转换：{current} -> {new_state}")
+            db.execute(
+                "UPDATE jobs SET state = ?, error = ?, updated_at = ? WHERE id = ?",
+                (new_state, error, _now(), job_id),
+            )
+            updated = db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        assert updated is not None
+        return self._row(updated)
+
+    def recover_interrupted(self) -> int:
+        with self._connect() as db:
+            placeholders = ",".join("?" for _ in RUNNING_STATES)
+            cursor = db.execute(
+                f"UPDATE jobs SET state = 'queued', error = ?, updated_at = ? WHERE state IN ({placeholders})",
+                ("上次运行中断，任务已恢复到队列", _now(), *sorted(RUNNING_STATES)),
+            )
+            return int(cursor.rowcount)
+
