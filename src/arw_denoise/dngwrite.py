@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import struct
 
 import numpy as np
 
@@ -8,6 +9,7 @@ from .domain import ExternalToolError, RawMetadata
 
 
 _PIXEL_LOCATION_TAGS = {273, 279, 324, 325}
+_PIXEL_DEPENDENT_TAGS = {50781, 50972, 51111}
 
 
 def snapshot_dng_metadata(path: Path) -> tuple[tuple[int, int, str, int, str], ...]:
@@ -19,10 +21,58 @@ def snapshot_dng_metadata(path: Path) -> tuple[tuple[int, int, str, int, str], .
                 (page_index, int(tag.code), str(tag.dtype), int(tag.count), repr(tag.value))
                 for page_index, page in enumerate(tif.pages)
                 for tag in page.tags.values()
-                if int(tag.code) not in _PIXEL_LOCATION_TAGS
+                if int(tag.code) not in _PIXEL_LOCATION_TAGS | _PIXEL_DEPENDENT_TAGS
             )
     except Exception as exc:
         raise ExternalToolError(f"无法建立 DNG 元数据快照：{exc}") from exc
+
+
+def remove_pixel_dependent_tags(path: Path) -> set[int]:
+    """Remove stale RAW digests/unique IDs by compacting their TIFF IFD entries."""
+    try:
+        import tifffile
+        with tifffile.TiffFile(path) as tif:
+            byteorder = tif.byteorder
+            is_bigtiff = bool(tif.is_bigtiff)
+            pages = [
+                (int(page.offset), {int(tag.code) for tag in page.tags if int(tag.code) in _PIXEL_DEPENDENT_TAGS})
+                for page in tif.pages
+            ]
+    except Exception as exc:
+        raise ExternalToolError(f"无法检查 DNG 像素摘要标签：{exc}") from exc
+
+    count_format = byteorder + ("Q" if is_bigtiff else "H")
+    next_format = byteorder + ("Q" if is_bigtiff else "I")
+    count_size = 8 if is_bigtiff else 2
+    entry_size = 20 if is_bigtiff else 12
+    next_size = 8 if is_bigtiff else 4
+    removed: set[int] = set()
+    try:
+        with Path(path).open("r+b") as stream:
+            for offset, present in pages:
+                if not present:
+                    continue
+                stream.seek(offset)
+                count_bytes = stream.read(count_size)
+                count = int(struct.unpack(count_format, count_bytes)[0])
+                entries = [stream.read(entry_size) for _ in range(count)]
+                next_ifd = stream.read(next_size)
+                kept: list[bytes] = []
+                for entry in entries:
+                    code = int(struct.unpack(byteorder + "H", entry[:2])[0])
+                    if code in _PIXEL_DEPENDENT_TAGS:
+                        removed.add(code)
+                    else:
+                        kept.append(entry)
+                stream.seek(offset)
+                stream.write(struct.pack(count_format, len(kept)))
+                for entry in kept:
+                    stream.write(entry)
+                stream.write(next_ifd)
+                stream.write(b"\0" * ((count - len(kept)) * entry_size))
+    except Exception as exc:
+        raise ExternalToolError(f"无法移除过期的 DNG 像素摘要：{exc}") from exc
+    return removed
 
 
 def _numeric_tag(page, code: int, label: str, count: int | None = None) -> np.ndarray:

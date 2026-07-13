@@ -10,7 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .domain import ExternalToolError, RawMetadata
-from .dngwrite import replace_cfa_pixels_in_place, snapshot_dng_metadata, validate_processed_dng
+from .dngwrite import (
+    remove_pixel_dependent_tags,
+    replace_cfa_pixels_in_place,
+    snapshot_dng_metadata,
+    validate_processed_dng,
+)
 
 
 @dataclass(frozen=True)
@@ -133,6 +138,7 @@ class DngLabClient:
                 raise ExternalToolError(f"dnglab 基础 DNG 转换失败：{message}")
             metadata_before = snapshot_dng_metadata(temporary)
             replace_cfa_pixels_in_place(temporary, processed_visible, metadata)
+            remove_pixel_dependent_tags(temporary)
             if snapshot_dng_metadata(temporary) != metadata_before:
                 raise ExternalToolError("写回 CFA 像素时 DNG 元数据发生变化")
             analysis = self.analyze(temporary)

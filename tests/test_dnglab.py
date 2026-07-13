@@ -58,6 +58,9 @@ class FakeCfaDngLab(FakeDngLab):
                     (50721, "d", 9, (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0), False),
                     (50728, "d", 3, (1.0, 1.0, 1.0), False),
                     (50778, "H", 1, 21, False),
+                    (50781, "B", 16, bytes(range(16)), False),
+                    (50972, "B", 16, bytes(range(16)), False),
+                    (51111, "B", 16, bytes(range(16)), False),
                 ],
             )
             return subprocess.CompletedProcess(args, 0, "converted", "")
@@ -80,6 +83,8 @@ def test_write_processed_cfa_publishes_validated_pixels(tmp_path: Path):
     )
     FakeCfaDngLab().write_processed_cfa(source, output, pixels, metadata)
     np.testing.assert_array_equal(tifffile.imread(output), pixels)
+    with tifffile.TiffFile(output) as tif:
+        assert not ({50781, 50972, 51111} & {int(tag.code) for tag in tif.pages[0].tags})
 
 
 def test_packaged_runtime_discovers_bundled_dnglab(tmp_path: Path, monkeypatch):
