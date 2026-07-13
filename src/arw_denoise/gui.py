@@ -14,7 +14,7 @@ def run_gui() -> int:
     try:
         from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
         from PySide6.QtWidgets import (
-            QApplication, QFileDialog, QHBoxLayout, QLabel, QListWidget, QMainWindow,
+            QApplication, QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow,
             QMessageBox, QPushButton, QSlider, QSplitter, QVBoxLayout, QWidget, QComboBox,
         )
     except ImportError as exc:
@@ -137,6 +137,9 @@ def run_gui() -> int:
             add_folder = QPushButton("添加文件夹")
             add_folder.clicked.connect(self.add_folder)
             layout.addWidget(add_folder)
+            retry = QPushButton("重试失败任务")
+            retry.clicked.connect(self.retry_failed)
+            layout.addWidget(retry)
             layout.addStretch(1)
             return panel
 
@@ -202,10 +205,19 @@ def run_gui() -> int:
             jobs = self.store.list()
             self.queue.clear()
             for job in jobs:
-                self.queue.addItem(f"#{job.id}  [{job.state}]  {job.source_path.name}  →  {job.output_path.name}")
+                item = QListWidgetItem(f"#{job.id}  [{job.state}]  {job.source_path.name}  →  {job.output_path.name}")
+                if job.error:
+                    item.setToolTip(job.error)
+                    item.setText(f"{item.text()}  ·  {job.error}")
+                self.queue.addItem(item)
             self.summary.setText(f"共 {len(jobs)} 张 · 等待 {sum(job.state == 'queued' for job in jobs)} 张")
             running = self.thread is not None and self.thread.isRunning()
             self.start_button.setEnabled(not running and any(job.state == "queued" for job in jobs))
+
+        def retry_failed(self) -> None:
+            for job in self.store.list("failed"):
+                self.store.transition(job.id, "queued")
+            self.refresh()
 
         def start_processing(self) -> None:
             if self.thread is not None and self.thread.isRunning():

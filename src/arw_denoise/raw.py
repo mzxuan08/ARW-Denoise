@@ -4,6 +4,7 @@ import math
 from pathlib import Path
 from typing import Protocol
 
+from .dnglab import DngLabClient
 from .domain import RawFrame, RawMetadata, UnsupportedRawError
 
 
@@ -19,8 +20,9 @@ def _bits_for_white_level(white_level: float) -> int:
 class RawPyDecoder:
     """Thin, optional LibRaw/rawpy adapter that preserves the mosaic."""
 
-    def __init__(self, allow_experimental: bool = False):
+    def __init__(self, allow_experimental: bool = False, dnglab: DngLabClient | None = None):
         self.allow_experimental = allow_experimental
+        self.dnglab = dnglab
 
     @staticmethod
     def _rawpy():
@@ -39,32 +41,45 @@ class RawPyDecoder:
             raise UnsupportedRawError(f"找不到 RAW 文件：{path.name}")
         try:
             with rawpy.imread(str(path)) as raw:
+                dnglab = self.dnglab or DngLabClient()
+                document = dnglab.metadata(path)
+                try:
+                    metadata_root = document["data"]["metadata"]
+                    raw_params = metadata_root["rawParams"]
+                    raw_metadata = metadata_root["rawMetadata"]
+                    exif = raw_metadata["exif"]
+                    active = raw_params["activeArea"]
+                    active_point = active["p"]
+                    active_size = active["d"]
+                except (KeyError, TypeError) as exc:
+                    raise UnsupportedRawError("dnglab 返回的 RAW 元数据结构不完整") from exc
                 pattern_array = raw.raw_pattern
                 if pattern_array is None or tuple(pattern_array.shape) != (2, 2):
                     raise UnsupportedRawError("首版仅支持 2x2 Bayer RAW")
                 pattern = tuple(int(v) for v in pattern_array.reshape(-1))
                 desc = bytes(raw.color_desc).decode("ascii", errors="replace").rstrip("\x00")
                 sizes = raw.sizes
-                metadata = raw.metadata
+                black_levels = tuple(_rational(value) for value in raw_params["blacklevels"]["levels"])
+                white_levels = raw_params.get("whitelevels") or [raw.white_level]
                 result = RawMetadata(
                     path=path.resolve(),
-                    width=int(sizes.width),
-                    height=int(sizes.height),
-                    raw_width=int(sizes.raw_width),
-                    raw_height=int(sizes.raw_height),
+                    width=int(active_size["w"]),
+                    height=int(active_size["h"]),
+                    raw_width=int(raw_params.get("rawWidth", sizes.raw_width)),
+                    raw_height=int(raw_params.get("rawHeight", sizes.raw_height)),
                     cfa_pattern=pattern,  # type: ignore[arg-type]
                     color_description=desc,
-                    black_levels=tuple(float(v) for v in raw.black_level_per_channel),  # type: ignore[arg-type]
-                    white_level=float(raw.white_level),
-                    bits_per_sample=_bits_for_white_level(raw.white_level),
-                    top_margin=int(sizes.top_margin),
-                    left_margin=int(sizes.left_margin),
-                    make=getattr(metadata, "make", None),
-                    model=getattr(metadata, "model", None),
-                    iso=int(metadata.iso_speed) if getattr(metadata, "iso_speed", 0) else None,
-                    shutter_seconds=float(metadata.shutter) if getattr(metadata, "shutter", 0) else None,
-                    aperture=float(metadata.aperture) if getattr(metadata, "aperture", 0) else None,
-                    focal_length_mm=float(metadata.focal_len) if getattr(metadata, "focal_len", 0) else None,
+                    black_levels=black_levels,  # type: ignore[arg-type]
+                    white_level=float(white_levels[0]),
+                    bits_per_sample=int(raw_params.get("bitDepth") or _bits_for_white_level(white_levels[0])),
+                    top_margin=int(active_point["y"]),
+                    left_margin=int(active_point["x"]),
+                    make=raw_metadata.get("make"),
+                    model=raw_metadata.get("model"),
+                    iso=int(exif.get("iso_speed_ratings") or exif.get("recommended_exposure_index")) if (exif.get("iso_speed_ratings") or exif.get("recommended_exposure_index")) else None,
+                    shutter_seconds=_optional_rational(exif.get("exposure_time")),
+                    aperture=_optional_rational(exif.get("fnumber")),
+                    focal_length_mm=_optional_rational(exif.get("focal_length")),
                 )
                 result.validate()
                 make = (result.make or "").strip().lower()
@@ -84,9 +99,28 @@ class RawPyDecoder:
         metadata = self.probe(path)
         try:
             with rawpy.imread(str(path)) as raw:
-                pixels = raw.raw_image_visible.copy()
+                top, left = metadata.top_margin, metadata.left_margin
+                pixels = raw.raw_image[
+                    top:top + metadata.height,
+                    left:left + metadata.width,
+                ].copy()
         except Exception as exc:
             raise UnsupportedRawError(f"无法解码 {Path(path).name} 的 Bayer 数据：{exc}") from exc
         frame = RawFrame(metadata=metadata, pixels=pixels)
         frame.validate()
         return frame
+
+
+def _rational(value: object) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    numerator, separator, denominator = str(value).partition("/")
+    if not separator:
+        return float(numerator)
+    return float(numerator) / float(denominator)
+
+
+def _optional_rational(value: object | None) -> float | None:
+    if value is None:
+        return None
+    return _rational(value)

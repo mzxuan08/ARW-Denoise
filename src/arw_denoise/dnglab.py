@@ -83,6 +83,16 @@ class DngLabClient:
         except json.JSONDecodeError as exc:
             raise ExternalToolError("dnglab 未返回有效 JSON 结构") from exc
 
+    def metadata(self, path: Path) -> dict:
+        result = self._run("analyze", "--meta", "--json", str(path))
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout).strip()
+            raise ExternalToolError(f"RAW 元数据读取失败：{message}")
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise ExternalToolError("dnglab 未返回有效的 RAW 元数据 JSON") from exc
+
     def compatibility_convert(self, source: Path, output: Path, embed_raw: bool = False) -> DngLabResult:
         """Create an untouched compatibility DNG; this does not denoise pixels."""
         source = Path(source).resolve()

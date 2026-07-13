@@ -44,10 +44,19 @@ def test_compatibility_convert_is_atomic_and_refuses_overwrite(tmp_path: Path):
 class FakeCfaDngLab(FakeDngLab):
     def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
         if args[0] == "convert":
-            tifffile.imwrite(
-                args[-1], np.full((8, 12), 512, np.uint16), photometric=32803,
-                compression=None, metadata=None,
-                extratags=[
+            with tifffile.TiffWriter(args[-1]) as tif:
+                tif.write(
+                    np.zeros((4, 6, 3), np.uint8), photometric="rgb", metadata=None, subifds=1,
+                    extratags=[
+                        (50721, "2i", 9, (1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1), False),
+                        (50728, "2I", 3, (1, 1, 1, 1, 1, 1), False),
+                        (50778, "H", 1, 21, False),
+                    ],
+                )
+                tif.write(
+                    np.full((8, 12), 512, np.uint16), photometric=32803,
+                    compression=None, metadata=None,
+                    extratags=[
                     (33421, "H", 2, (2, 2), False),
                     (33422, "B", 4, (0, 1, 1, 2), False),
                     (50713, "H", 2, (2, 2), False),
@@ -55,14 +64,11 @@ class FakeCfaDngLab(FakeDngLab):
                     (50717, "H", 1, 16383, False),
                     (50719, "H", 2, (0, 0), False),
                     (50720, "I", 2, (12, 8), False),
-                    (50721, "d", 9, (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0), False),
-                    (50728, "d", 3, (1.0, 1.0, 1.0), False),
-                    (50778, "H", 1, 21, False),
                     (50781, "B", 16, bytes(range(16)), False),
                     (50972, "B", 16, bytes(range(16)), False),
                     (51111, "B", 16, bytes(range(16)), False),
-                ],
-            )
+                    ],
+                )
             return subprocess.CompletedProcess(args, 0, "converted", "")
         return super()._run(*args)
 
@@ -82,9 +88,11 @@ def test_write_processed_cfa_publishes_validated_pixels(tmp_path: Path):
         black_levels=(512, 512, 512, 512), white_level=16383, bits_per_sample=14,
     )
     FakeCfaDngLab().write_processed_cfa(source, output, pixels, metadata)
-    np.testing.assert_array_equal(tifffile.imread(output), pixels)
     with tifffile.TiffFile(output) as tif:
-        assert not ({50781, 50972, 51111} & {int(tag.code) for tag in tif.pages[0].tags})
+        np.testing.assert_array_equal(tif.series[1].asarray(), pixels)
+    with tifffile.TiffFile(output) as tif:
+        all_tags = {int(tag.code) for series in tif.series for page in series.pages for tag in page.tags}
+        assert not ({50781, 50972, 51111} & all_tags)
 
 
 def test_packaged_runtime_discovers_bundled_dnglab(tmp_path: Path, monkeypatch):
