@@ -47,6 +47,14 @@ class TensorSpec:
 
 
 @dataclass(frozen=True)
+class NoiseInputSpec:
+    name: str
+    dtype: str
+    shape: tuple[str | int, int, int, int]
+    value_range: tuple[float, float]
+
+
+@dataclass(frozen=True)
 class RuntimeSpec:
     minimum_onnxruntime: str
     providers: tuple[str, ...]
@@ -70,6 +78,7 @@ class ModelManifest:
     license: str
     input: TensorSpec
     output: TensorSpec
+    noise_input: NoiseInputSpec
     runtime: RuntimeSpec
     tiling: TilingSpec
     artifact_path: Path
@@ -132,6 +141,31 @@ def _parse_tensor(value: Any, name: str) -> TensorSpec:
     )
 
 
+def _parse_noise_input(value: Any) -> NoiseInputSpec:
+    data = _strict_object(value, "noise_input", {"name", "dtype", "shape", "range"})
+    dtype = _text(data["dtype"], "noise_input.dtype")
+    shape = data["shape"]
+    value_range = data["range"]
+    if dtype != "float32":
+        raise ModelManifestError("模型清单 noise_input.dtype 必须是 float32")
+    if not isinstance(shape, list) or shape != ["N", 1, 1, 1]:
+        raise ModelManifestError("模型清单 noise_input.shape 必须是 [N, 1, 1, 1]")
+    if not isinstance(value_range, list) or len(value_range) != 2:
+        raise ModelManifestError("模型清单 noise_input.range 必须包含上下界")
+    try:
+        bounds = (float(value_range[0]), float(value_range[1]))
+    except (TypeError, ValueError) as exc:
+        raise ModelManifestError("模型清单 noise_input.range 无效") from exc
+    if bounds[0] < 1.0 or bounds[1] <= bounds[0]:
+        raise ModelManifestError("模型清单 noise_input.range 无效")
+    return NoiseInputSpec(
+        name=_text(data["name"], "noise_input.name"),
+        dtype=dtype,
+        shape=("N", 1, 1, 1),
+        value_range=bounds,
+    )
+
+
 def _artifact_path(manifest_path: Path, file_name: str) -> Path:
     if Path(file_name).is_absolute():
         raise ModelManifestError("模型文件必须位于模型目录内")
@@ -174,6 +208,7 @@ def load_manifest(path: Path | str, *, verify_artifact: bool = True) -> ModelMan
             "license",
             "input",
             "output",
+            "noise_input",
             "runtime",
             "tiling",
         },
@@ -245,6 +280,7 @@ def load_manifest(path: Path | str, *, verify_artifact: bool = True) -> ModelMan
         license=_text(data["license"], "license"),
         input=_parse_tensor(data["input"], "input"),
         output=_parse_tensor(data["output"], "output"),
+        noise_input=_parse_noise_input(data["noise_input"]),
         runtime=RuntimeSpec(minimum_onnxruntime=minimum_ort, providers=tuple(providers)),
         tiling=tiling,
         artifact_path=resolved_artifact,
@@ -262,4 +298,3 @@ def default_model_root() -> Path:
     if getattr(sys, "frozen", False) or executable_models.is_dir():
         return executable_models.resolve()
     return (Path(__file__).resolve().parents[2] / "models").resolve()
-

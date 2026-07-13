@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "model_id": "pmrid-general-raw",
+  "display_name": "PMRID 通用 RAW GPU",
+  "version": "1.0.0",
+  "artifact": {
+    "file": "pmrid-fp16.onnx",
+    "sha256": "c785511029e11a647e69e8dcdfa22107c2d6b5f3a6fbc9247622b594d437d31e",
+    "format": "onnx",
+    "precision": "fp16"
+  },
+  "source": {
+    "repository": "https://github.com/MegEngine/PMRID",
+    "commit": "8ebb9e8e96559881dee957f34243933c5beb77dd",
+    "checkpoint_sha256": "9361614f3514d27351d81909f2215c0fdc38619c0288d936b7266485ac106c14"
+  },
+  "license": "Apache-2.0",
+  "input": {
+    "name": "raw",
+    "layout": "NCHW",
+    "channels": 4,
+    "dtype": "float32",
+    "range": [
+      0.0,
+      1.0
+    ],
+    "cfa_order": [
+      "R",
+      "G1",
+      "G2",
+      "B"
+    ]
+  },
+  "output": {
+    "name": "denoised",
+    "layout": "NCHW",
+    "channels": 4,
+    "dtype": "float32",
+    "range": [
+      0.0,
+      1.0
+    ],
+    "cfa_order": [
+      "R",
+      "G1",
+      "G2",
+      "B"
+    ]
+  },
+  "noise_input": {
+    "name": "effective_iso",
+    "dtype": "float32",
+    "shape": [
+      "N",
+      1,
+      1,
+      1
+    ],
+    "range": [
+      100.0,
+      25600.0
+    ]
+  },
+  "runtime": {
+    "minimum_onnxruntime": "1.23.2",
+    "providers": [
+      "CUDAExecutionProvider",
+      "CPUExecutionProvider"
+    ]
+  },
+  "tiling": {
+    "recommended_size": 1024,
+    "overlap": 64,
+    "minimum_size": 256
+  }
+}

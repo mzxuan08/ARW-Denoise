@@ -9,6 +9,9 @@ import pytest
 from arw_denoise.model_manifest import ModelManifestError, default_model_root, load_manifest
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
 def _write_manifest(root: Path, **changes: object) -> Path:
     artifact = root / "pmrid-fp16.onnx"
     artifact.write_bytes(b"onnx model bytes")
@@ -33,7 +36,7 @@ def _write_manifest(root: Path, **changes: object) -> Path:
             "name": "raw",
             "layout": "NCHW",
             "channels": 4,
-            "dtype": "float16",
+            "dtype": "float32",
             "range": [0.0, 1.0],
             "cfa_order": ["R", "G1", "G2", "B"],
         },
@@ -41,9 +44,15 @@ def _write_manifest(root: Path, **changes: object) -> Path:
             "name": "denoised",
             "layout": "NCHW",
             "channels": 4,
-            "dtype": "float16",
+            "dtype": "float32",
             "range": [0.0, 1.0],
             "cfa_order": ["R", "G1", "G2", "B"],
+        },
+        "noise_input": {
+            "name": "effective_iso",
+            "dtype": "float32",
+            "shape": ["N", 1, 1, 1],
+            "range": [100.0, 25600.0],
         },
         "runtime": {
             "minimum_onnxruntime": "1.23.2",
@@ -63,6 +72,7 @@ def test_load_manifest_verifies_contract_and_artifact(tmp_path: Path) -> None:
     assert manifest.model_id == "pmrid-general-raw"
     assert manifest.artifact_path.name == "pmrid-fp16.onnx"
     assert manifest.input.channels == 4
+    assert manifest.noise_input.name == "effective_iso"
     assert manifest.tiling.recommended_size == 1024
 
 
@@ -98,6 +108,16 @@ def test_manifest_rejects_missing_and_unknown_fields(tmp_path: Path) -> None:
         load_manifest(path)
 
 
+def test_manifest_rejects_invalid_noise_input(tmp_path: Path) -> None:
+    path = _write_manifest(tmp_path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["noise_input"]["shape"] = [1]
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    with pytest.raises(ModelManifestError, match="noise_input"):
+        load_manifest(path)
+
+
 def test_manifest_rejects_bad_hash(tmp_path: Path) -> None:
     path = _write_manifest(tmp_path)
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -127,3 +147,9 @@ def test_default_model_root_prefers_environment(monkeypatch: pytest.MonkeyPatch,
     monkeypatch.setenv("ARW_DENOISE_MODEL_DIR", str(tmp_path))
     assert default_model_root() == tmp_path.resolve()
 
+
+def test_bundled_manifest_schema_is_valid_without_loading_binary() -> None:
+    manifest = load_manifest(ROOT / "models" / "pmrid" / "manifest.json", verify_artifact=False)
+    assert manifest.model_id == "pmrid-general-raw"
+    assert manifest.source.commit == "8ebb9e8e96559881dee957f34243933c5beb77dd"
+    assert manifest.artifact.sha256 == "c785511029e11a647e69e8dcdfa22107c2d6b5f3a6fbc9247622b594d437d31e"
