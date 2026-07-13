@@ -79,6 +79,7 @@ class JobStore:
                 """
             )
             db.execute("CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state, id)")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_output_path ON jobs(output_path)")
 
     @staticmethod
     def _row(row: sqlite3.Row) -> Job:
@@ -102,6 +103,32 @@ class JobStore:
             cursor = db.execute(
                 "INSERT INTO jobs(source_path, output_path, state, mode, parameters_json, created_at, updated_at) VALUES(?, ?, 'queued', ?, ?, ?, ?)",
                 (str(Path(source).resolve()), str(Path(output).resolve()), mode, json.dumps(parameters or {}, ensure_ascii=False), now, now),
+            )
+            row = db.execute("SELECT * FROM jobs WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        assert row is not None
+        return self._row(row)
+
+    def add_with_available_output(
+        self, source: Path, output_dir: Path, mode: str = "auto", parameters: dict | None = None
+    ) -> Job:
+        source = Path(source).resolve()
+        output_dir = Path(output_dir).resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{source.stem}_DN"
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            reserved = {Path(row[0]) for row in db.execute("SELECT output_path FROM jobs").fetchall()}
+            index = 1
+            while True:
+                name = f"{stem}.dng" if index == 1 else f"{stem}_{index}.dng"
+                candidate = output_dir / name
+                if candidate not in reserved and not candidate.exists():
+                    break
+                index += 1
+            now = _now()
+            cursor = db.execute(
+                "INSERT INTO jobs(source_path, output_path, state, mode, parameters_json, created_at, updated_at) VALUES(?, ?, 'queued', ?, ?, ?, ?)",
+                (str(source), str(candidate), mode, json.dumps(parameters or {}, ensure_ascii=False), now, now),
             )
             row = db.execute("SELECT * FROM jobs WHERE id = ?", (cursor.lastrowid,)).fetchone()
         assert row is not None
@@ -150,4 +177,3 @@ class JobStore:
                 ("上次运行中断，任务已恢复到队列", _now(), *sorted(RUNNING_STATES)),
             )
             return int(cursor.rowcount)
-

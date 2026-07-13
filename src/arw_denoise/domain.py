@@ -38,6 +38,14 @@ class RawMetadata:
     aperture: float | None = None
     focal_length_mm: float | None = None
 
+    @property
+    def resolved_cfa(self) -> tuple[str, str, str, str]:
+        description = self.color_description.upper()
+        try:
+            return tuple(description[index] for index in self.cfa_pattern)  # type: ignore[return-value]
+        except (IndexError, TypeError) as exc:
+            raise UnsupportedRawError("CFA 索引无法映射到颜色描述") from exc
+
     def validate(self) -> None:
         if self.width <= 0 or self.height <= 0:
             raise UnsupportedRawError("RAW 的可见区域尺寸无效")
@@ -49,6 +57,9 @@ class RawMetadata:
             raise UnsupportedRawError("RAW active area 超出完整像素平面")
         if len(self.cfa_pattern) != 4 or any(v not in (0, 1, 2, 3) for v in self.cfa_pattern):
             raise UnsupportedRawError("无法可靠识别 2x2 Bayer CFA")
+        colors = self.resolved_cfa
+        if colors.count("R") != 1 or colors.count("G") != 2 or colors.count("B") != 1:
+            raise UnsupportedRawError(f"不支持的 CFA 颜色排列：{''.join(colors)}")
         if len(self.black_levels) != 4:
             raise UnsupportedRawError("缺少四通道黑电平")
         if self.white_level <= max(self.black_levels):

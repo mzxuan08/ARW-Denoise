@@ -9,9 +9,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from .domain import ExternalToolError
-from .domain import RawMetadata
-from .dngwrite import replace_cfa_pixels_in_place
+from .domain import ExternalToolError, RawMetadata
+from .dngwrite import replace_cfa_pixels_in_place, validate_processed_dng
 
 
 @dataclass(frozen=True)
@@ -37,6 +36,7 @@ class DngLabClient:
         if environment:
             return environment
         candidates = (
+            Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent)) / "tools" / "dnglab.exe",
             Path(sys.executable).resolve().parent / "tools" / "dnglab.exe",
             Path(__file__).resolve().parent / "bin" / "dnglab.exe",
             Path.cwd() / "vendor" / "dnglab" / "dnglab.exe",
@@ -89,6 +89,7 @@ class DngLabClient:
         output.parent.mkdir(parents=True, exist_ok=True)
         temporary = output.with_name(f".{output.stem}.{uuid.uuid4().hex}.tmp.dng")
         try:
+            tool_version = self.version()
             result = self._run(
                 "convert",
                 "--compression", "lossless",
@@ -100,8 +101,8 @@ class DngLabClient:
                 message = (result.stderr or result.stdout).strip()
                 raise ExternalToolError(f"dnglab 转换失败：{message}")
             analysis = self.analyze(temporary)
-            os.replace(temporary, output)
-            return DngLabResult(output=output, version=self.version(), analysis=analysis)
+            self._publish_no_overwrite(temporary, output)
+            return DngLabResult(output=output, version=tool_version, analysis=analysis)
         finally:
             temporary.unlink(missing_ok=True)
 
@@ -122,6 +123,7 @@ class DngLabClient:
         output.parent.mkdir(parents=True, exist_ok=True)
         temporary = output.with_name(f".{output.stem}.{uuid.uuid4().hex}.processing.dng")
         try:
+            tool_version = self.version()
             result = self._run(
                 "convert", "--compression", "uncompressed", "--embed-raw", "false",
                 str(source), str(temporary),
@@ -131,7 +133,19 @@ class DngLabClient:
                 raise ExternalToolError(f"dnglab 基础 DNG 转换失败：{message}")
             replace_cfa_pixels_in_place(temporary, processed_visible, metadata)
             analysis = self.analyze(temporary)
-            os.replace(temporary, output)
-            return DngLabResult(output=output, version=self.version(), analysis=analysis)
+            validate_processed_dng(temporary, processed_visible, metadata)
+            self._publish_no_overwrite(temporary, output)
+            return DngLabResult(output=output, version=tool_version, analysis=analysis)
         finally:
             temporary.unlink(missing_ok=True)
+
+    @staticmethod
+    def _publish_no_overwrite(temporary: Path, output: Path) -> None:
+        """Atomically publish on the same volume without replacing another process's file."""
+        try:
+            os.link(temporary, output)
+        except FileExistsError as exc:
+            raise ExternalToolError(f"发布时输出已存在：{output.name}") from exc
+        except OSError as exc:
+            raise ExternalToolError(f"无法原子发布 DNG：{exc}") from exc
+        temporary.unlink()

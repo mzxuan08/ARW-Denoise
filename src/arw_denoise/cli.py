@@ -11,7 +11,6 @@ from .dnglab import DngLabClient
 from .domain import ArwDenoiseError
 from .gui import run_gui
 from .jobs import JobStore
-from .naming import available_output_path
 from .processor import CpuRawProcessor, ProcessingSettings
 from .raw import RawPyDecoder
 
@@ -65,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
         store = JobStore(paths.database)
         if args.command == "queue-add":
             output_dir = args.output_dir or args.source.parent / "DNG_Denoised"
-            job = store.add(args.source, available_output_path(args.source, output_dir))
+            job = store.add_with_available_output(args.source, output_dir)
             print(f"已加入任务 #{job.id}: {job.source_path.name}")
             return 0
         if args.command == "queue-list":

@@ -27,3 +27,10 @@ def test_failed_job_can_retry(tmp_path: Path):
     assert retried.state == "queued"
     assert retried.error is None
 
+
+def test_output_names_are_reserved_before_files_exist(tmp_path: Path):
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    first = store.add_with_available_output(tmp_path / "one" / "same.ARW", tmp_path / "out")
+    second = store.add_with_available_output(tmp_path / "two" / "same.ARW", tmp_path / "out")
+    assert first.output_path.name == "same_DN.dng"
+    assert second.output_path.name == "same_DN_2.dng"

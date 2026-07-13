@@ -1,4 +1,5 @@
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -46,7 +47,12 @@ class FakeCfaDngLab(FakeDngLab):
             tifffile.imwrite(
                 args[-1], np.full((8, 12), 512, np.uint16), photometric=32803,
                 compression=None, metadata=None,
-                extratags=[(33421, "H", 2, (2, 2), False), (33422, "B", 4, (0, 1, 1, 2), False)],
+                extratags=[
+                    (33421, "H", 2, (2, 2), False),
+                    (33422, "B", 4, (0, 1, 1, 2), False),
+                    (50714, "H", 4, (512, 512, 512, 512), False),
+                    (50717, "H", 1, 16383, False),
+                ],
             )
             return subprocess.CompletedProcess(args, 0, "converted", "")
         return super()._run(*args)
@@ -68,3 +74,22 @@ def test_write_processed_cfa_publishes_validated_pixels(tmp_path: Path):
     )
     FakeCfaDngLab().write_processed_cfa(source, output, pixels, metadata)
     np.testing.assert_array_equal(tifffile.imread(output), pixels)
+
+
+def test_packaged_runtime_discovers_bundled_dnglab(tmp_path: Path, monkeypatch):
+    executable = tmp_path / "tools" / "dnglab.exe"
+    executable.parent.mkdir()
+    executable.touch()
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+    assert DngLabClient._discover(None) == str(executable)
+
+
+def test_atomic_publish_does_not_overwrite_racing_file(tmp_path: Path):
+    temporary = tmp_path / ".temporary.dng"
+    output = tmp_path / "output.dng"
+    temporary.write_bytes(b"new")
+    output.write_bytes(b"other process")
+    with pytest.raises(ExternalToolError, match="已存在"):
+        DngLabClient._publish_no_overwrite(temporary, output)
+    assert output.read_bytes() == b"other process"
+    assert temporary.read_bytes() == b"new"

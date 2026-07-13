@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from arw_denoise.domain import RawMetadata
+from arw_denoise.domain import RawMetadata, UnsupportedRawError
 from arw_denoise.pipeline import pack_normalized_bayer, tiled_inference, unpack_normalized_bayer
 
 
@@ -36,3 +36,9 @@ def test_tiled_inference_rejects_bad_shape():
     with pytest.raises(ValueError):
         tiled_inference(image, lambda tile: tile[:, :-1], tile_size=32, overlap=8)
 
+
+def test_metadata_rejects_non_bayer_color_layout():
+    bad = metadata()
+    object.__setattr__(bad, "cfa_pattern", (0, 0, 1, 2))
+    with pytest.raises(UnsupportedRawError, match="CFA"):
+        bad.validate()

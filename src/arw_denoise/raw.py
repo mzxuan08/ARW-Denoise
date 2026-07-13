@@ -19,6 +19,9 @@ def _bits_for_white_level(white_level: float) -> int:
 class RawPyDecoder:
     """Thin, optional LibRaw/rawpy adapter that preserves the mosaic."""
 
+    def __init__(self, allow_experimental: bool = False):
+        self.allow_experimental = allow_experimental
+
     @staticmethod
     def _rawpy():
         try:
@@ -64,6 +67,12 @@ class RawPyDecoder:
                     focal_length_mm=float(metadata.focal_len) if getattr(metadata, "focal_len", 0) else None,
                 )
                 result.validate()
+                make = (result.make or "").strip().lower()
+                model = (result.model or "").strip().upper()
+                supported = "sony" in make and model == "ILCE-7CM2"
+                if not supported and not self.allow_experimental:
+                    label = " ".join(value for value in (result.make, result.model) if value) or "未知机型"
+                    raise UnsupportedRawError(f"首版仅正式支持 Sony ILCE-7CM2；当前文件为 {label}")
                 return result
         except UnsupportedRawError:
             raise

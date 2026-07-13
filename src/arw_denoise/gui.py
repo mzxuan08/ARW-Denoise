@@ -6,15 +6,13 @@ import time
 
 from .config import AppPaths
 from .jobs import JobStore
-from .naming import available_output_path
 from .dnglab import DngLabClient
-from .domain import ArwDenoiseError
 from .processor import CpuRawProcessor, ProcessingSettings
 
 
 def run_gui() -> int:
     try:
-        from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
+        from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
         from PySide6.QtWidgets import (
             QApplication, QFileDialog, QHBoxLayout, QLabel, QListWidget, QMainWindow,
             QMessageBox, QPushButton, QSlider, QSplitter, QVBoxLayout, QWidget, QComboBox,
@@ -37,40 +35,39 @@ def run_gui() -> int:
         def run(self) -> None:
             try:
                 processor = CpuRawProcessor(dnglab=DngLabClient())
-            except Exception as exc:
-                self.notice.emit(str(exc))
-                self.finished.emit()
-                return
-            for job in self.store.list("queued"):
-                if self.cancel_requested.is_set():
-                    self.store.transition(job.id, "cancelled")
-                    self.updated.emit()
-                    continue
-                while self.pause_requested.is_set() and not self.cancel_requested.is_set():
-                    time.sleep(0.1)
-                if self.cancel_requested.is_set():
-                    self.store.transition(job.id, "cancelled")
-                    self.updated.emit()
-                    continue
-                try:
-                    self.store.transition(job.id, "decoding")
-                    self.updated.emit()
-
-                    def phase(name: str) -> None:
-                        self.store.transition(job.id, name)
+                for job in self.store.list("queued"):
+                    if self.cancel_requested.is_set():
+                        self.store.transition(job.id, "cancelled")
+                        self.updated.emit()
+                        continue
+                    while self.pause_requested.is_set() and not self.cancel_requested.is_set():
+                        time.sleep(0.1)
+                    if self.cancel_requested.is_set():
+                        self.store.transition(job.id, "cancelled")
+                        self.updated.emit()
+                        continue
+                    try:
+                        self.store.transition(job.id, "decoding")
                         self.updated.emit()
 
-                    strength = float(job.parameters.get("strength", 1.0))
-                    processor.process(job.source_path, job.output_path, ProcessingSettings(strength=strength), phase)
-                    self.store.transition(job.id, "validating")
-                    self.store.transition(job.id, "completed")
-                except Exception as exc:
-                    current = self.store.get(job.id)
-                    if current.state in {"decoding", "denoising", "writing", "validating"}:
-                        self.store.transition(job.id, "failed", str(exc))
-                    self.notice.emit(f"{job.source_path.name}: {exc}")
-                self.updated.emit()
-            self.finished.emit()
+                        def phase(name: str) -> None:
+                            self.store.transition(job.id, name)
+                            self.updated.emit()
+
+                        strength = float(job.parameters.get("strength", 1.0))
+                        processor.process(job.source_path, job.output_path, ProcessingSettings(strength=strength), phase)
+                        self.store.transition(job.id, "validating")
+                        self.store.transition(job.id, "completed")
+                    except Exception as exc:
+                        current = self.store.get(job.id)
+                        if current.state in {"decoding", "denoising", "writing", "validating"}:
+                            self.store.transition(job.id, "failed", str(exc))
+                        self.notice.emit(f"{job.source_path.name}: {exc}")
+                    self.updated.emit()
+            except Exception as exc:
+                self.notice.emit(str(exc))
+            finally:
+                self.finished.emit()
 
         def pause(self) -> None:
             self.pause_requested.set()
@@ -93,6 +90,7 @@ def run_gui() -> int:
             self.store.recover_interrupted()
             self.thread = None
             self.worker = None
+            self._close_after_processing = False
 
             splitter = QSplitter()
             splitter.addWidget(self._sources_panel())
@@ -159,13 +157,16 @@ def run_gui() -> int:
             title.setStyleSheet("font-size: 18px; font-weight: 600")
             layout.addWidget(title)
             self.mode = QComboBox()
-            self.mode.addItems(["自动", "极暗", "CPU 兼容"])
+            self.mode.addItems(["CPU 兼容（当前可用）"])
             layout.addWidget(self.mode)
-            for label in ("降噪强度", "彩色噪点", "细节保护", "伪影抑制"):
+            self.sliders = {}
+            for index, label in enumerate(("降噪强度", "彩色噪点（GPU 版本）", "细节保护（GPU 版本）", "伪影抑制（GPU 版本）")):
                 layout.addWidget(QLabel(label))
                 slider = QSlider(Qt.Horizontal)
                 slider.setRange(0, 100)
                 slider.setValue(50)
+                slider.setEnabled(index == 0)
+                self.sliders[label] = slider
                 layout.addWidget(slider)
             note = QLabel("当前版本使用保守的 CPU Bayer 小波基线并输出无压缩 CFA DNG；正式使用前仍需完成 A7C II 的 Adobe/像素蛋糕兼容测试。")
             note.setWordWrap(True)
@@ -178,9 +179,9 @@ def run_gui() -> int:
             if not paths:
                 return
             output_dir = paths[0].parent / "DNG_Denoised"
+            strength = self.sliders["降噪强度"].value() / 50.0
             for path in paths:
-                output = available_output_path(path, output_dir)
-                self.store.add(path, output)
+                self.store.add_with_available_output(path, output_dir, mode="cpu", parameters={"strength": strength})
             self.refresh()
 
         def add_files(self) -> None:
@@ -216,6 +217,7 @@ def run_gui() -> int:
             self.worker.updated.connect(self.refresh)
             self.worker.notice.connect(lambda message: self.statusBar().showMessage(message, 12000))
             self.worker.finished.connect(self.thread.quit)
+            self.worker.finished.connect(self.worker.deleteLater)
             self.thread.finished.connect(self.processing_finished)
             self.thread.finished.connect(self.thread.deleteLater)
             self.thread.start()
@@ -253,6 +255,18 @@ def run_gui() -> int:
             self.cancel_button.setEnabled(False)
             self.statusBar().showMessage("队列处理结束", 5000)
             self.refresh()
+            if self._close_after_processing:
+                QTimer.singleShot(0, self.close)
+
+        def closeEvent(self, event) -> None:
+            if self.thread is not None and self.thread.isRunning():
+                self._close_after_processing = True
+                if self.worker:
+                    self.worker.cancel()
+                self.statusBar().showMessage("正在安全结束当前照片，请稍候…")
+                event.ignore()
+                return
+            event.accept()
 
     app = QApplication.instance() or QApplication([])
     window = MainWindow()
