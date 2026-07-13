@@ -10,8 +10,9 @@ from .config import AppPaths
 from .dnglab import DngLabClient
 from .domain import ArwDenoiseError
 from .gui import run_gui
+from .gpu_probe import create_default_gpu_probe
 from .jobs import JobStore
-from .processor import CpuRawProcessor, ProcessingSettings
+from .processor import AutoProcessingSettings, CpuRawProcessor, ProcessingSettings, SmartRawProcessor
 from .raw import RawPyDecoder
 
 
@@ -30,6 +31,15 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("output", type=Path)
     process.add_argument("--dnglab", type=Path)
     process.add_argument("--strength", type=float, default=1.0)
+    smart = sub.add_parser("process", help="自动选择 GPU/CPU 执行 Bayer 降噪并写入 CFA DNG")
+    smart.add_argument("source", type=Path)
+    smart.add_argument("output", type=Path)
+    smart.add_argument("--mode", choices=("auto", "gpu", "cpu"), default="auto")
+    smart.add_argument("--strength", type=float)
+    smart.add_argument("--chroma-noise", type=float)
+    smart.add_argument("--detail-protection", type=float)
+    smart.add_argument("--artifact-suppression", type=float)
+    sub.add_parser("gpu-probe", help="执行一次真实 PMRID CUDA 推理自检")
     queue = sub.add_parser("queue-add", help="把 ARW 加入持久化队列")
     queue.add_argument("source", type=Path)
     queue.add_argument("--output-dir", type=Path)
@@ -58,6 +68,38 @@ def main(argv: list[str] | None = None) -> int:
                 args.source, args.output, ProcessingSettings(strength=args.strength)
             )
             print(json.dumps({"output": str(result.output), "dnglab": result.version, "mode": "cpu"}, ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "gpu-probe":
+            result = create_default_gpu_probe().run(force=True)
+            print(json.dumps(asdict(result), ensure_ascii=False, indent=2))
+            return 0 if result.success else 3
+        if args.command == "process":
+            result = SmartRawProcessor().process(
+                args.source,
+                args.output,
+                AutoProcessingSettings(
+                    mode=args.mode,
+                    strength=args.strength,
+                    chroma_noise=args.chroma_noise,
+                    detail_protection=args.detail_protection,
+                    artifact_suppression=args.artifact_suppression,
+                ),
+            )
+            print(
+                json.dumps(
+                    {
+                        "output": str(result.dng.output),
+                        "dnglab": result.dng.version,
+                        "engine": asdict(result.engine),
+                        "stats": asdict(result.stats),
+                        "automatic": asdict(result.automatic),
+                        "postprocess": asdict(result.postprocess),
+                        "fallback_reason": result.fallback_reason,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
             return 0
         paths = AppPaths.default()
         paths.ensure()

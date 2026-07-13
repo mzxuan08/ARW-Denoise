@@ -4,10 +4,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+import numpy as np
+
+from .auto_tune import AutoDenoiseConfig, tune_automatic
 from .denoise import HaarWaveletDenoiser
 from .dnglab import DngLabClient, DngLabResult
+from .engines import CpuHaarEngine, DenoiseRequest, DenoiseResult, EngineInfo, EngineRunStats
+from .gpu_probe import query_nvidia_device
+from .model_manifest import default_model_root, load_manifest
+from .onnx_engine import GpuRuntimeError, OnnxRuntimeEngine
 from .pipeline import pack_normalized_bayer, tiled_inference, unpack_normalized_bayer
+from .postprocess import PostprocessSettings, postprocess_raw
 from .raw import RawDecoder, RawPyDecoder
+from .tile_scheduler import AdaptiveTileRunner
 
 
 @dataclass(frozen=True)
@@ -15,6 +24,42 @@ class ProcessingSettings:
     strength: float = 1.0
     tile_size: int = 1024
     overlap: int = 64
+
+
+@dataclass(frozen=True)
+class AutoProcessingSettings:
+    mode: str = "auto"
+    strength: float | None = None
+    chroma_noise: float | None = None
+    detail_protection: float | None = None
+    artifact_suppression: float | None = None
+    cpu_tile_size: int = 1024
+    cpu_overlap: int = 64
+
+    def validate(self) -> None:
+        if self.mode not in {"auto", "gpu", "cpu"}:
+            raise ValueError("处理模式必须是 auto、gpu 或 cpu")
+        if self.cpu_tile_size <= 2 * self.cpu_overlap:
+            raise ValueError("CPU 分块必须大于两倍重叠")
+        values = (
+            ("strength", self.strength, 0.0, 2.0),
+            ("chroma_noise", self.chroma_noise, 0.0, 1.0),
+            ("detail_protection", self.detail_protection, 0.0, 1.0),
+            ("artifact_suppression", self.artifact_suppression, 0.0, 1.0),
+        )
+        for name, value, low, high in values:
+            if value is not None and not low <= value <= high:
+                raise ValueError(f"{name} 超出范围")
+
+
+@dataclass(frozen=True)
+class SmartProcessingResult:
+    dng: DngLabResult
+    engine: EngineInfo
+    stats: EngineRunStats
+    automatic: AutoDenoiseConfig
+    postprocess: PostprocessSettings
+    fallback_reason: str | None = None
 
 
 class CpuRawProcessor:
@@ -45,3 +90,147 @@ class CpuRawProcessor:
         if on_phase:
             on_phase("writing")
         return self.dnglab.write_processed_cfa(source, output, restored, frame.metadata)
+
+
+class SmartRawProcessor:
+    def __init__(
+        self,
+        decoder: RawDecoder | None = None,
+        dnglab: DngLabClient | None = None,
+        *,
+        gpu_runner: AdaptiveTileRunner | None = None,
+        cpu_engine: CpuHaarEngine | None = None,
+    ):
+        self.decoder = decoder or RawPyDecoder()
+        self.dnglab = dnglab or DngLabClient()
+        self._gpu_runner = gpu_runner
+        self._cpu_engine = cpu_engine or CpuHaarEngine()
+
+    def _default_gpu_runner(self) -> AdaptiveTileRunner:
+        root = default_model_root()
+        manifest = load_manifest(root / "pmrid" / "manifest.json")
+        cached_engine: list[OnnxRuntimeEngine | None] = [None]
+
+        def engine_factory() -> OnnxRuntimeEngine:
+            if cached_engine[0] is None:
+                cached_engine[0] = OnnxRuntimeEngine(manifest, require_cuda=True)
+            return cached_engine[0]
+
+        return AdaptiveTileRunner(
+            engine_factory,
+            memory_total_mb=query_nvidia_device().memory_total_mb,
+            recommended_size=manifest.tiling.recommended_size,
+            minimum_size=manifest.tiling.minimum_size,
+            overlap=manifest.tiling.overlap,
+        )
+
+    def _resolve_postprocess(
+        self,
+        automatic: AutoDenoiseConfig,
+        settings: AutoProcessingSettings,
+    ) -> PostprocessSettings:
+        return PostprocessSettings(
+            strength=automatic.strength if settings.strength is None else settings.strength,
+            chroma_noise=automatic.chroma_noise if settings.chroma_noise is None else settings.chroma_noise,
+            detail_protection=(
+                automatic.detail_protection
+                if settings.detail_protection is None
+                else settings.detail_protection
+            ),
+            artifact_suppression=(
+                automatic.artifact_suppression
+                if settings.artifact_suppression is None
+                else settings.artifact_suppression
+            ),
+        )
+
+    def _run_cpu(
+        self,
+        packed: np.ndarray,
+        automatic: AutoDenoiseConfig,
+        post: PostprocessSettings,
+        settings: AutoProcessingSettings,
+    ) -> DenoiseResult:
+        seconds = 0.0
+
+        def infer(tile: np.ndarray) -> np.ndarray:
+            nonlocal seconds
+            result = self._cpu_engine.run(
+                DenoiseRequest(
+                    packed=tile,
+                    effective_iso=automatic.effective_iso,
+                    strength=post.strength,
+                )
+            )
+            seconds += result.stats.inference_seconds
+            return result.packed
+
+        output = tiled_inference(
+            packed,
+            infer,
+            tile_size=settings.cpu_tile_size,
+            overlap=settings.cpu_overlap,
+        )
+        return DenoiseResult(
+            packed=output,
+            engine=self._cpu_engine.info,
+            stats=EngineRunStats(inference_seconds=seconds, tile_size=settings.cpu_tile_size),
+        )
+
+    def process(
+        self,
+        source: Path,
+        output: Path,
+        settings: AutoProcessingSettings | None = None,
+        on_phase: Callable[[str], None] | None = None,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> SmartProcessingResult:
+        settings = settings or AutoProcessingSettings()
+        settings.validate()
+        frame = self.decoder.decode(source)
+        packed, context = pack_normalized_bayer(frame.pixels, frame.metadata)
+        automatic = tune_automatic(packed, frame.metadata)
+        post = self._resolve_postprocess(automatic, settings)
+        post.validate()
+        if on_phase:
+            on_phase("denoising")
+
+        fallback_reason: str | None = None
+        if settings.mode == "cpu":
+            denoised = self._run_cpu(packed, automatic, post, settings)
+        else:
+            try:
+                if self._gpu_runner is None:
+                    self._gpu_runner = self._default_gpu_runner()
+                model_result = self._gpu_runner.run(
+                    DenoiseRequest(
+                        packed=packed,
+                        effective_iso=automatic.effective_iso,
+                        strength=1.0,
+                    ),
+                    on_progress=on_progress,
+                )
+                processed = postprocess_raw(packed, model_result.packed, post)
+                denoised = DenoiseResult(
+                    packed=processed,
+                    engine=model_result.engine,
+                    stats=model_result.stats,
+                )
+            except GpuRuntimeError as exc:
+                if settings.mode == "gpu":
+                    raise
+                fallback_reason = str(exc)
+                denoised = self._run_cpu(packed, automatic, post, settings)
+
+        restored = unpack_normalized_bayer(denoised.packed, context)
+        if on_phase:
+            on_phase("writing")
+        dng_result = self.dnglab.write_processed_cfa(source, output, restored, frame.metadata)
+        return SmartProcessingResult(
+            dng=dng_result,
+            engine=denoised.engine,
+            stats=denoised.stats,
+            automatic=automatic,
+            postprocess=post,
+            fallback_reason=fallback_reason,
+        )
