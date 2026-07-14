@@ -45,3 +45,12 @@ def test_collect_rejects_case_insensitive_duplicate_names(tmp_path: Path, monkey
         pytest.skip("filesystem is case insensitive")
     with pytest.raises(ValueError, match="duplicate"):
         collect_files(tmp_path)
+
+
+def test_verify_rejects_changed_or_missing_checksum_index(tmp_path: Path) -> None:
+    (tmp_path / "app.exe").write_bytes(b"app")
+    _manifest, sums = write_manifest(tmp_path)
+    sums.write_text("tampered\n", encoding="utf-8")
+    assert verify_manifest(tmp_path) == ["changed: SHA256SUMS.txt"]
+    sums.unlink()
+    assert verify_manifest(tmp_path) == ["missing SHA256SUMS.txt"]

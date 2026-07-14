@@ -47,15 +47,17 @@ def build_manifest(root: Path) -> dict[str, object]:
     return {"schema_version": 1, "files": collect_files(root)}
 
 
+def _sums_text(records: list[dict[str, object]]) -> str:
+    return "".join(f"{record['sha256']}  {record['path']}\n" for record in records)
+
+
 def write_manifest(root: Path) -> tuple[Path, Path]:
     root = Path(root).resolve()
     manifest = build_manifest(root)
     manifest_path = root / MANIFEST_NAME
     sums_path = root / SUMS_NAME
     manifest_text = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
-    sums_text = "".join(
-        f"{record['sha256']}  {record['path']}\n" for record in manifest["files"]  # type: ignore[index]
-    )
+    sums_text = _sums_text(manifest["files"])  # type: ignore[arg-type]
     for path, content in ((manifest_path, manifest_text), (sums_path, sums_text)):
         temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
         try:
@@ -71,6 +73,9 @@ def verify_manifest(root: Path) -> list[str]:
     manifest_path = root / MANIFEST_NAME
     if not manifest_path.is_file():
         return [f"missing {MANIFEST_NAME}"]
+    sums_path = root / SUMS_NAME
+    if not sums_path.is_file():
+        return [f"missing {SUMS_NAME}"]
     try:
         expected = json.loads(manifest_path.read_text(encoding="utf-8"))
         if expected.get("schema_version") != 1 or not isinstance(expected.get("files"), list):
@@ -88,6 +93,14 @@ def verify_manifest(root: Path) -> list[str]:
     for path in sorted(expected_by_path.keys() & actual_by_path.keys()):
         if expected_by_path[path] != actual_by_path[path]:
             errors.append(f"changed: {path}")
+    expected_sums = _sums_text(expected["files"])
+    try:
+        actual_sums = sums_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        errors.append(str(exc))
+    else:
+        if actual_sums != expected_sums:
+            errors.append(f"changed: {SUMS_NAME}")
     return errors
 
 
