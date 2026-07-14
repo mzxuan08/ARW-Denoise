@@ -131,3 +131,33 @@ def test_user_cancel_is_timestamped_and_retry_clears_cancel_marker(tmp_path: Pat
     assert cancelled.cancelled_at is not None
     retried = store.transition(job.id, "queued")
     assert retried.cancelled_at is None
+
+
+def test_retry_resets_old_progress(tmp_path: Path):
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    job = store.add(tmp_path / "a.ARW", tmp_path / "a.dng")
+    store.record_progress(
+        job.id, phase="denoising", phase_progress=0.5, overall_progress=0.4, elapsed_seconds=2
+    )
+    store.transition(job.id, "cancelled")
+    retried = store.transition(job.id, "queued")
+    assert retried.phase is None
+    assert retried.overall_progress == 0
+    assert retried.elapsed_seconds == 0
+
+
+def test_delete_completed_only_removes_history_records(tmp_path: Path):
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    output = tmp_path / "finished.dng"
+    output.write_bytes(b"keep me")
+    completed = store.add(tmp_path / "a.ARW", output)
+    store.transition(completed.id, "decoding")
+    store.transition(completed.id, "denoising")
+    store.transition(completed.id, "writing")
+    store.transition(completed.id, "validating")
+    store.transition(completed.id, "completed")
+    queued = store.add(tmp_path / "b.ARW", tmp_path / "queued.dng")
+
+    assert store.delete_completed() == 1
+    assert output.read_bytes() == b"keep me"
+    assert [job.id for job in store.list()] == [queued.id]

@@ -4,7 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from arw_denoise.gui_helpers import explorer_arguments, job_parameters, open_in_explorer
+from arw_denoise.gui_helpers import (
+    explorer_arguments,
+    format_duration,
+    job_parameters,
+    open_in_explorer,
+    progress_eta,
+    queue_progress,
+)
 from arw_denoise.settings import AppSettings
 
 
@@ -47,3 +54,17 @@ def test_locate_file_uses_select_argument(tmp_path: Path) -> None:
 def test_open_missing_output_reports_error(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="找不到"):
         open_in_explorer(tmp_path / "missing")
+
+
+def test_progress_display_helpers_do_not_show_false_precision() -> None:
+    class Item:
+        def __init__(self, state: str, overall_progress: float = 0.0):
+            self.state = state
+            self.overall_progress = overall_progress
+
+    jobs = [Item("completed"), Item("denoising", 0.5), Item("queued")]
+    assert queue_progress(jobs) == pytest.approx(0.5)
+    assert progress_eta(4.0, 0.05) is None
+    assert progress_eta(4.0, 0.5) == pytest.approx(4.0)
+    assert format_duration(None) == "--"
+    assert format_duration(65) == "01:05"

@@ -239,10 +239,18 @@ class JobStore:
                 raise ValueError(f"非法状态转换：{current} -> {new_state}")
             now = _now()
             cancelled_at = now if new_state == "cancelled" else (None if new_state == "queued" else row["cancelled_at"])
-            db.execute(
-                "UPDATE jobs SET state = ?, error = ?, cancelled_at = ?, updated_at = ? WHERE id = ?",
-                (new_state, error, cancelled_at, now, job_id),
-            )
+            if new_state == "queued":
+                db.execute(
+                    """UPDATE jobs SET state = ?, error = ?, cancelled_at = ?, phase = NULL,
+                    phase_progress = 0, overall_progress = 0, elapsed_seconds = 0,
+                    updated_at = ? WHERE id = ?""",
+                    (new_state, error, cancelled_at, now, job_id),
+                )
+            else:
+                db.execute(
+                    "UPDATE jobs SET state = ?, error = ?, cancelled_at = ?, updated_at = ? WHERE id = ?",
+                    (new_state, error, cancelled_at, now, job_id),
+                )
             updated = db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
         assert updated is not None
         return self._row(updated)
@@ -325,4 +333,10 @@ class JobStore:
                 f"UPDATE jobs SET state = 'queued', error = ?, updated_at = ? WHERE state IN ({placeholders})",
                 ("上次运行中断，任务已恢复到队列", _now(), *sorted(RUNNING_STATES)),
             )
+            return int(cursor.rowcount)
+
+    def delete_completed(self) -> int:
+        """Delete completed history records without touching exported files."""
+        with self._connect() as db:
+            cursor = db.execute("DELETE FROM jobs WHERE state = 'completed'")
             return int(cursor.rowcount)

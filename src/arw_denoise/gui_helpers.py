@@ -7,6 +7,37 @@ from typing import Callable, Sequence
 from .settings import AppSettings
 
 
+def format_duration(seconds: float | None) -> str:
+    if seconds is None or seconds < 0:
+        return "--"
+    rounded = int(round(seconds))
+    minutes, remaining = divmod(rounded, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{remaining:02d}"
+    return f"{minutes:02d}:{remaining:02d}"
+
+
+def queue_progress(jobs: Sequence[object]) -> float:
+    if not jobs:
+        return 0.0
+    progress = 0.0
+    for job in jobs:
+        state = str(getattr(job, "state"))
+        if state == "completed":
+            progress += 1.0
+        elif state not in {"queued", "failed", "cancelled"}:
+            progress += float(getattr(job, "overall_progress", 0.0))
+    return min(1.0, max(0.0, progress / len(jobs)))
+
+
+def progress_eta(elapsed_seconds: float, overall_progress: float) -> float | None:
+    """Estimate remaining time only after enough of the current file has run."""
+    if elapsed_seconds <= 0 or overall_progress < 0.1 or overall_progress >= 1.0:
+        return None
+    return elapsed_seconds * (1.0 - overall_progress) / overall_progress
+
+
 def job_parameters(settings: AppSettings) -> dict[str, float]:
     if not settings.advanced_enabled:
         return {}

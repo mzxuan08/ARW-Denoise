@@ -7,10 +7,17 @@ from pathlib import Path
 from .config import AppPaths
 from .dnglab import DngLabClient
 from .gpu_probe import create_default_gpu_probe
-from .gui_helpers import job_parameters, open_in_explorer
+from .gui_helpers import (
+    format_duration,
+    job_parameters,
+    open_in_explorer,
+    progress_eta,
+    queue_progress,
+)
 from .jobs import Job, JobStore
 from .processor import AutoProcessingSettings, SmartRawProcessor
 from .settings import AppSettings, SettingsStore, resolve_output_dir
+from .task_control import ProcessingCancelled, ProgressEvent, ProgressTracker, TaskController
 
 
 def run_gui() -> int:
@@ -29,6 +36,7 @@ def run_gui() -> int:
             QMainWindow,
             QMessageBox,
             QPushButton,
+            QProgressBar,
             QSlider,
             QSplitter,
             QVBoxLayout,
@@ -47,6 +55,8 @@ def run_gui() -> int:
             self.store = store
             self.pause_requested = threading.Event()
             self.cancel_requested = threading.Event()
+            self._control_lock = threading.Lock()
+            self._current_control: TaskController | None = None
 
         @Slot()
         def run(self) -> None:
@@ -66,6 +76,25 @@ def run_gui() -> int:
                     try:
                         self.store.transition(job.id, "decoding")
                         self.updated.emit()
+                        started = time.monotonic()
+
+                        def save_progress(event: ProgressEvent) -> None:
+                            self.store.record_progress(
+                                job.id,
+                                phase=event.phase,
+                                phase_progress=event.phase_progress,
+                                overall_progress=event.overall,
+                                elapsed_seconds=max(0.0, event.timestamp - started),
+                            )
+                            self.updated.emit()
+
+                        control = TaskController(
+                            progress_tracker=ProgressTracker(job.id, on_progress=save_progress)
+                        )
+                        with self._control_lock:
+                            self._current_control = control
+                        if self.cancel_requested.is_set():
+                            control.cancel()
 
                         def phase(name: str) -> None:
                             self.store.transition(job.id, name)
@@ -82,6 +111,7 @@ def run_gui() -> int:
                             job.output_path,
                             AutoProcessingSettings(mode=mode, **allowed),
                             on_phase=phase,
+                            control=control,
                         )
                         self.store.record_runtime(
                             job.id,
@@ -94,11 +124,18 @@ def run_gui() -> int:
                         )
                         self.store.transition(job.id, "validating")
                         self.store.transition(job.id, "completed")
+                    except ProcessingCancelled:
+                        current = self.store.get(job.id)
+                        if current.state in {"decoding", "denoising", "writing", "validating"}:
+                            self.store.transition(job.id, "cancelled")
                     except Exception as exc:
                         current = self.store.get(job.id)
                         if current.state in {"decoding", "denoising", "writing", "validating"}:
                             self.store.transition(job.id, "failed", str(exc))
                         self.notice.emit(f"{job.source_path.name}: {exc}")
+                    finally:
+                        with self._control_lock:
+                            self._current_control = None
                     self.updated.emit()
             except Exception as exc:
                 self.notice.emit(str(exc))
@@ -114,6 +151,10 @@ def run_gui() -> int:
         def cancel(self) -> None:
             self.cancel_requested.set()
             self.pause_requested.clear()
+            with self._control_lock:
+                control = self._current_control
+            if control is not None:
+                control.cancel()
 
     class ProbeWorker(QObject):
         completed = Signal(object)
@@ -171,8 +212,21 @@ def run_gui() -> int:
             self.cancel_button.setEnabled(False)
             bottom.addWidget(self.cancel_button)
 
+            progress = QVBoxLayout()
+            self.progress_status = QLabel("尚未开始")
+            progress.addWidget(self.progress_status)
+            self.file_progress = QProgressBar()
+            self.file_progress.setRange(0, 1000)
+            self.file_progress.setFormat("当前文件 %p%")
+            progress.addWidget(self.file_progress)
+            self.queue_progress_bar = QProgressBar()
+            self.queue_progress_bar.setRange(0, 1000)
+            self.queue_progress_bar.setFormat("整体队列 %p%")
+            progress.addWidget(self.queue_progress_bar)
+
             root = QVBoxLayout()
             root.addWidget(splitter, 1)
+            root.addLayout(progress)
             root.addLayout(bottom)
             widget = QWidget()
             widget.setLayout(root)
@@ -196,6 +250,12 @@ def run_gui() -> int:
             retry = QPushButton("重试失败任务")
             retry.clicked.connect(self.retry_failed)
             layout.addWidget(retry)
+            retry_cancelled = QPushButton("重试已取消任务")
+            retry_cancelled.clicked.connect(self.retry_cancelled)
+            layout.addWidget(retry_cancelled)
+            clear_completed = QPushButton("清理已完成记录")
+            clear_completed.clicked.connect(self.clear_completed)
+            layout.addWidget(clear_completed)
             open_output = QPushButton("打开导出目录")
             open_output.clicked.connect(self.open_output_folder)
             layout.addWidget(open_output)
@@ -455,6 +515,29 @@ def run_gui() -> int:
                     self.queue.setCurrentItem(item)
             queued = sum(job.state == "queued" for job in jobs)
             self.summary.setText(f"共 {len(jobs)} 张 · 等待 {queued} 张（队列无数量限制）")
+            self.queue_progress_bar.setValue(round(queue_progress(jobs) * 1000))
+            active = next(
+                (job for job in jobs if job.state in {"decoding", "denoising", "writing", "validating"}),
+                None,
+            )
+            if active is None:
+                self.file_progress.setValue(0)
+                self.progress_status.setText("尚未开始" if queued else "队列已结束")
+            else:
+                self.file_progress.setValue(round(active.overall_progress * 1000))
+                phase_names = {
+                    "decoding": "解码 RAW",
+                    "denoising": "AI 降噪",
+                    "postprocessing": "保护细节与高光",
+                    "writing": "写入 DNG",
+                    "validating": "校验 DNG",
+                }
+                eta = progress_eta(active.elapsed_seconds, active.overall_progress)
+                eta_text = format_duration(eta) if eta is not None else "计算中"
+                phase_name = phase_names.get(active.phase or active.state, active.phase or active.state)
+                self.progress_status.setText(
+                    f"{active.source_path.name} · {phase_name} · 已用 {format_duration(active.elapsed_seconds)} · 剩余约 {eta_text}"
+                )
             running = self.thread is not None and self.thread.isRunning()
             self.start_button.setEnabled(not running and queued > 0)
 
@@ -462,6 +545,16 @@ def run_gui() -> int:
             for job in self.store.list("failed"):
                 self.store.transition(job.id, "queued")
             self.refresh()
+
+        def retry_cancelled(self) -> None:
+            for job in self.store.list("cancelled"):
+                self.store.transition(job.id, "queued")
+            self.refresh()
+
+        def clear_completed(self) -> None:
+            removed = self.store.delete_completed()
+            self.refresh()
+            self.statusBar().showMessage(f"已清理 {removed} 条完成记录，DNG 文件已保留", 5000)
 
         def probe_gpu(self) -> None:
             if self.probe_thread is not None and self.probe_thread.isRunning():
@@ -532,7 +625,7 @@ def run_gui() -> int:
             if self.worker:
                 self.worker.cancel()
                 self.cancel_button.setEnabled(False)
-                self.statusBar().showMessage("将在当前照片完成后取消剩余任务")
+                self.statusBar().showMessage("正在立即取消当前照片并停止队列…")
 
         @Slot()
         def processing_finished(self) -> None:
@@ -551,7 +644,7 @@ def run_gui() -> int:
                 self._close_after_processing = True
                 if self.worker:
                     self.worker.cancel()
-                self.statusBar().showMessage("正在安全结束当前照片，请稍候…")
+                self.statusBar().showMessage("正在终止当前处理并清理临时文件，请稍候…")
                 event.ignore()
                 return
             if self.probe_thread is not None and self.probe_thread.isRunning():
