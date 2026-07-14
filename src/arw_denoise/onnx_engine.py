@@ -47,6 +47,8 @@ class OnnxRuntimeEngine:
         self._validate_runtime_version()
         self.session = self._create_session()
         self._validate_session_contract()
+        self._raw_buffer: np.ndarray | None = None
+        self._noise_buffer = np.empty((1, 1, 1, 1), dtype=np.float32)
 
     @staticmethod
     def _import_runtime() -> Any:
@@ -178,9 +180,14 @@ class OnnxRuntimeEngine:
         height, width, _ = request.packed.shape
         if height % 16 or width % 16:
             raise GpuRuntimeError("PMRID 输入高宽必须能被 16 整除")
-        raw = np.ascontiguousarray(request.packed.transpose(2, 0, 1)[None], dtype=np.float32)
+        raw_shape = (1, 4, height, width)
+        if self._raw_buffer is None or self._raw_buffer.shape != raw_shape:
+            self._raw_buffer = np.empty(raw_shape, dtype=np.float32)
+        raw = self._raw_buffer
+        np.copyto(raw[0], request.packed.transpose(2, 0, 1), casting="same_kind")
         low, high = self.manifest.noise_input.value_range
-        effective_iso = np.array([[[[np.clip(request.effective_iso, low, high)]]]], dtype=np.float32)
+        self._noise_buffer[0, 0, 0, 0] = np.clip(request.effective_iso, low, high)
+        effective_iso = self._noise_buffer
         started = time.perf_counter()
         try:
             values = self.session.run(

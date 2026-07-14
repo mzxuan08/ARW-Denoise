@@ -93,9 +93,19 @@ def query_gpu_vram_mb(
     return max(values) if values else None
 
 
-def query_vram_mb() -> float | None:
-    process_value = query_process_vram_mb()
-    return process_value if process_value is not None else query_gpu_vram_mb()
+class NvidiaVramSampler:
+    """Prefer per-process VRAM, but remember when WDDM only exposes device totals."""
+
+    def __init__(self) -> None:
+        self._per_process_supported = True
+
+    def __call__(self) -> float | None:
+        if self._per_process_supported:
+            process_value = query_process_vram_mb()
+            if process_value is not None:
+                return process_value
+            self._per_process_supported = False
+        return query_gpu_vram_mb()
 
 
 class ResourceMonitor:
@@ -116,7 +126,7 @@ class ResourceMonitor:
             process_factory = psutil.Process
         self.interval_seconds = interval_seconds
         self._process_factory = process_factory
-        self._vram_sampler = vram_sampler or query_vram_mb
+        self._vram_sampler = vram_sampler or NvidiaVramSampler()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._peak_ram_mb: float | None = None

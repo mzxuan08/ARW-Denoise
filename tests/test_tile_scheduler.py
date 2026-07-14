@@ -49,11 +49,16 @@ def test_choose_tile_sizes_uses_vram_and_finite_retry_sequence() -> None:
 def test_adaptive_runner_restarts_smaller_after_cuda_oom() -> None:
     seen_shapes: list[tuple[int, int]] = []
     factories = 0
+    resets = 0
 
     def factory():
         nonlocal factories
         factories += 1
         return RecordingEngine(seen_shapes, max_size=512)
+
+    def reset():
+        nonlocal resets
+        resets += 1
 
     runner = AdaptiveTileRunner(
         factory,
@@ -61,6 +66,7 @@ def test_adaptive_runner_restarts_smaller_after_cuda_oom() -> None:
         recommended_size=1024,
         minimum_size=256,
         overlap=64,
+        reset_engine=reset,
     )
     packed = np.full((700, 700, 4), 0.5, dtype=np.float32)
     result = runner.run(DenoiseRequest(packed=packed, effective_iso=1600.0))
@@ -69,6 +75,7 @@ def test_adaptive_runner_restarts_smaller_after_cuda_oom() -> None:
     assert np.allclose(result.packed, 0.45, atol=1e-6)
     assert result.stats.tile_size == 512
     assert factories == 3
+    assert resets == 2
     assert seen_shapes[:3] == [(704, 704), (704, 704), (512, 512)]
 
 

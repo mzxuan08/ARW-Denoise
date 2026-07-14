@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 from .config import AppPaths
@@ -61,9 +62,15 @@ def run_gui() -> int:
 
         @Slot()
         def run(self) -> None:
+            executor: ThreadPoolExecutor | None = None
             try:
                 processor = SmartRawProcessor(dnglab=DngLabClient())
-                for job in self.store.list("queued"):
+                jobs = self.store.list("queued")
+                executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="raw-prefetch")
+                prefetched: Future | None = (
+                    executor.submit(processor.decoder.decode, jobs[0].source_path) if jobs else None
+                )
+                for index, job in enumerate(jobs):
                     if self.cancel_requested.is_set():
                         self.store.transition(job.id, "cancelled")
                         self.updated.emit()
@@ -98,6 +105,16 @@ def run_gui() -> int:
                         if self.cancel_requested.is_set():
                             control.cancel()
 
+                        current_prefetch = prefetched
+                        prefetched = None
+                        decoded_frame = current_prefetch.result() if current_prefetch is not None else None
+                        next_job = jobs[index + 1] if index + 1 < len(jobs) else None
+                        prefetched = (
+                            executor.submit(processor.decoder.decode, next_job.source_path)
+                            if next_job is not None and not self.cancel_requested.is_set()
+                            else None
+                        )
+
                         def phase(name: str) -> None:
                             self.store.transition(job.id, name)
                             self.updated.emit()
@@ -114,6 +131,7 @@ def run_gui() -> int:
                             AutoProcessingSettings(mode=mode, **allowed),
                             on_phase=phase,
                             control=control,
+                            decoded_frame=decoded_frame,
                         )
                         peaks = monitor.stop()
                         self.store.record_runtime(
@@ -148,6 +166,8 @@ def run_gui() -> int:
             except Exception as exc:
                 self.notice.emit(str(exc))
             finally:
+                if executor is not None:
+                    executor.shutdown(wait=False, cancel_futures=True)
                 self.finished.emit()
 
         def pause(self) -> None:

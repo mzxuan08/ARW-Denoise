@@ -133,6 +133,11 @@ def test_cuda_engine_transposes_inputs_and_reports_actual_provider(tmp_path: Pat
     assert runtime.session.last_inputs["raw"].shape == (1, 4, 32, 48)
     assert runtime.session.last_inputs["effective_iso"].shape == (1, 1, 1, 1)
 
+    first_buffer = runtime.session.last_inputs["raw"]
+    engine.run(DenoiseRequest(packed=np.full_like(packed, 0.6), effective_iso=800.0))
+    assert runtime.session.last_inputs["raw"] is first_buffer
+    assert np.allclose(runtime.session.last_inputs["raw"], 0.6)
+
 
 def test_cuda_engine_rejects_missing_provider(tmp_path: Path) -> None:
     with pytest.raises(GpuRuntimeError, match="CUDAExecutionProvider"):

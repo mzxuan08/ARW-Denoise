@@ -9,6 +9,7 @@ import numpy as np
 from .auto_tune import AutoDenoiseConfig, tune_automatic
 from .denoise import HaarWaveletDenoiser
 from .dnglab import DngLabClient, DngLabResult
+from .domain import RawFrame
 from .engines import CpuHaarEngine, DenoiseRequest, DenoiseResult, EngineInfo, EngineRunStats
 from .gpu_probe import query_nvidia_device
 from .model_manifest import default_model_root, load_manifest
@@ -133,12 +134,16 @@ class SmartRawProcessor:
                 cached_engine[0] = OnnxRuntimeEngine(manifest, require_cuda=True)
             return cached_engine[0]
 
+        def reset_engine() -> None:
+            cached_engine[0] = None
+
         return AdaptiveTileRunner(
             engine_factory,
             memory_total_mb=query_nvidia_device().memory_total_mb,
             recommended_size=manifest.tiling.recommended_size,
             minimum_size=manifest.tiling.minimum_size,
             overlap=manifest.tiling.overlap,
+            reset_engine=reset_engine,
         )
 
     def _resolve_postprocess(
@@ -206,12 +211,14 @@ class SmartRawProcessor:
         on_phase: Callable[[str], None] | None = None,
         on_progress: Callable[[int, int], None] | None = None,
         control: TaskController | None = None,
+        decoded_frame: RawFrame | None = None,
     ) -> SmartProcessingResult:
         control = control or TaskController()
         control.progress("decoding", 0, 1)
         settings = settings or AutoProcessingSettings()
         settings.validate()
-        frame = self.decoder.decode(source)
+        frame = decoded_frame if decoded_frame is not None else self.decoder.decode(source)
+        frame.validate()
         control.progress("decoding", 1, 1)
         packed, context = pack_normalized_bayer(frame.pixels, frame.metadata)
         automatic = tune_automatic(packed, frame.metadata)

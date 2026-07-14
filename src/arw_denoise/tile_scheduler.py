@@ -93,6 +93,7 @@ class AdaptiveTileRunner:
         recommended_size: int,
         minimum_size: int,
         overlap: int,
+        reset_engine: Callable[[], None] | None = None,
     ):
         if overlap < 0 or minimum_size <= 2 * overlap:
             raise ValueError("overlap 对最小分块过大")
@@ -101,6 +102,7 @@ class AdaptiveTileRunner:
         self.recommended_size = recommended_size
         self.minimum_size = minimum_size
         self.overlap = overlap
+        self.reset_engine = reset_engine
 
     def run(
         self,
@@ -162,6 +164,8 @@ class AdaptiveTileRunner:
                     raise
                 last_oom = exc
                 del engine
+                if self.reset_engine is not None:
+                    self.reset_engine()
                 gc.collect()
                 continue
             if engine_info is None:

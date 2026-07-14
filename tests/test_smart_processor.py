@@ -107,6 +107,26 @@ def test_smart_processor_uses_gpu_model_then_raw_postprocess(tmp_path: Path) -> 
     assert gpu.request.strength == 1.0
 
 
+def test_smart_processor_accepts_prefetched_frame_without_decoding_again(tmp_path: Path) -> None:
+    pixels, metadata = _fixture(tmp_path)
+
+    class MustNotDecode(FakeDecoder):
+        def decode(self, path: Path) -> RawFrame:
+            raise AssertionError("prefetched frame should be reused")
+
+    processor = SmartRawProcessor(
+        decoder=MustNotDecode(pixels, metadata),
+        dnglab=FakeWriter(),
+        gpu_runner=FakeGpuRunner(),
+    )
+    result = processor.process(
+        metadata.path,
+        tmp_path / "out.dng",
+        decoded_frame=RawFrame(metadata, pixels),
+    )
+    assert result.engine.provider == "CUDAExecutionProvider"
+
+
 def test_auto_mode_falls_back_to_cpu_and_records_reason(tmp_path: Path) -> None:
     pixels, metadata = _fixture(tmp_path)
     writer = FakeWriter()
