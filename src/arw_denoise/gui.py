@@ -5,6 +5,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
+from .cache_storage import cache_usage, clear_managed_cache, ensure_managed_cache
 from .config import AppPaths
 from .dnglab import DngLabClient
 from .gpu_probe import create_default_gpu_probe
@@ -19,7 +20,7 @@ from .gui_helpers import (
 from .jobs import Job, JobStore
 from .metrics import ResourceMonitor
 from .processor import AutoProcessingSettings, SmartRawProcessor
-from .settings import AppSettings, SettingsStore, resolve_output_dir
+from .settings import AppSettings, SettingsStore, resolve_cache_dir, resolve_output_dir
 from .task_control import ProcessingCancelled, ProgressEvent, ProgressTracker, TaskController
 
 
@@ -210,6 +211,11 @@ def run_gui() -> int:
             self.store.recover_interrupted()
             self.settings_store = SettingsStore(self.paths.settings)
             self.settings = self.settings_store.load()
+            initial_cache = resolve_cache_dir(self.settings, self.paths.preview_cache)
+            self.preview_cache_dir = ensure_managed_cache(
+                initial_cache,
+                adopt_existing=initial_cache == self.paths.preview_cache.resolve(),
+            )
             self.thread = None
             self.worker = None
             self.probe_thread = None
@@ -352,6 +358,23 @@ def run_gui() -> int:
             self.output_dir = QLineEdit()
             layout.addWidget(self._path_row(self.output_dir, "选择", self.choose_output_dir))
 
+            layout.addWidget(QLabel("缓存存放位置"))
+            self.cache_parent_dir = QLineEdit()
+            self.cache_parent_dir.setPlaceholderText(
+                f"默认：{self.paths.preview_cache.parent}（可选择 F 盘等数据盘）"
+            )
+            layout.addWidget(
+                self._path_row(self.cache_parent_dir, "选择", self.choose_cache_parent_dir)
+            )
+            cache_actions = QHBoxLayout()
+            open_cache = QPushButton("打开缓存目录")
+            open_cache.clicked.connect(self.open_cache_directory)
+            cache_actions.addWidget(open_cache)
+            clear_cache = QPushButton("清理缓存")
+            clear_cache.clicked.connect(self.clear_preview_cache)
+            cache_actions.addWidget(clear_cache)
+            layout.addLayout(cache_actions)
+
             self.advanced_toggle = QPushButton("高级设置 ▸")
             self.advanced_toggle.setCheckable(True)
             self.advanced_toggle.toggled.connect(self._toggle_advanced)
@@ -391,6 +414,7 @@ def run_gui() -> int:
             self.mode.setCurrentIndex(max(0, index))
             self.import_dir.setText(self.settings.default_import_dir or "")
             self.output_dir.setText(self.settings.default_output_dir or "")
+            self.cache_parent_dir.setText(self.settings.cache_parent_dir or "")
             index = self.output_strategy.findData(self.settings.output_strategy)
             self.output_strategy.setCurrentIndex(max(0, index))
             self.advanced_toggle.setChecked(self.settings.advanced_expanded)
@@ -404,6 +428,7 @@ def run_gui() -> int:
             self.output_strategy.currentIndexChanged.connect(self._output_strategy_changed)
             self.import_dir.editingFinished.connect(self.save_settings)
             self.output_dir.editingFinished.connect(self.save_settings)
+            self.cache_parent_dir.editingFinished.connect(self.save_settings)
             self.advanced_enabled.toggled.connect(self.save_settings)
             for slider in self.sliders.values():
                 slider.sliderReleased.connect(self.save_settings)
@@ -412,6 +437,7 @@ def run_gui() -> int:
             return AppSettings(
                 default_import_dir=self.import_dir.text().strip() or None,
                 default_output_dir=self.output_dir.text().strip() or None,
+                cache_parent_dir=self.cache_parent_dir.text().strip() or None,
                 output_strategy=str(self.output_strategy.currentData()),
                 engine_mode=str(self.mode.currentData()),
                 advanced_expanded=self.advanced_toggle.isChecked(),
@@ -425,8 +451,30 @@ def run_gui() -> int:
         @Slot()
         def save_settings(self, *_args) -> None:
             try:
-                self.settings = self._current_settings()
-                self.settings_store.save(self.settings)
+                settings = self._current_settings()
+                resolved_cache = resolve_cache_dir(settings, self.paths.preview_cache)
+                new_cache = ensure_managed_cache(
+                    resolved_cache,
+                    adopt_existing=resolved_cache == self.paths.preview_cache.resolve(),
+                )
+                old_cache = self.preview_cache_dir
+                self.settings_store.save(settings)
+                self.settings = settings
+                if new_cache != old_cache:
+                    self.preview_cache_dir = new_cache
+                    try:
+                        removed_files, removed_bytes = clear_managed_cache(old_cache)
+                    except (OSError, ValueError) as exc:
+                        self.statusBar().showMessage(
+                            f"缓存已切换到 {new_cache}，但旧缓存清理失败：{exc}",
+                            12000,
+                        )
+                    else:
+                        self.statusBar().showMessage(
+                            f"缓存已切换到 {new_cache}；旧缓存已清理 "
+                            f"{removed_files} 个文件 / {removed_bytes / 1024**2:.1f} MB",
+                            10000,
+                        )
             except (OSError, ValueError) as exc:
                 self.statusBar().showMessage(f"无法保存设置：{exc}", 8000)
 
@@ -457,6 +505,43 @@ def run_gui() -> int:
                 self.output_dir.setText(selected)
                 self.output_strategy.setCurrentIndex(self.output_strategy.findData("fixed"))
                 self.save_settings()
+
+        def choose_cache_parent_dir(self) -> None:
+            start = self.cache_parent_dir.text().strip() or str(self.preview_cache_dir.parent)
+            selected = QFileDialog.getExistingDirectory(self, "选择缓存存放位置", start)
+            if selected:
+                self.cache_parent_dir.setText(selected)
+                self.save_settings()
+
+        def open_cache_directory(self) -> None:
+            try:
+                self.preview_cache_dir = ensure_managed_cache(self.preview_cache_dir)
+                open_in_explorer(self.preview_cache_dir)
+            except (OSError, ValueError) as exc:
+                QMessageBox.warning(self, "无法打开缓存目录", str(exc))
+
+        def clear_preview_cache(self) -> None:
+            try:
+                files, byte_count = cache_usage(self.preview_cache_dir)
+                if files == 0:
+                    self.statusBar().showMessage("缓存已经是空的", 5000)
+                    return
+                answer = QMessageBox.question(
+                    self,
+                    "清理缓存",
+                    f"将删除 {files} 个预览缓存文件（{byte_count / 1024**2:.1f} MB）。继续吗？",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if answer != QMessageBox.Yes:
+                    return
+                removed_files, removed_bytes = clear_managed_cache(self.preview_cache_dir)
+                self.statusBar().showMessage(
+                    f"已清理 {removed_files} 个缓存文件 / {removed_bytes / 1024**2:.1f} MB",
+                    8000,
+                )
+            except (OSError, ValueError) as exc:
+                QMessageBox.warning(self, "无法清理缓存", str(exc))
 
         def _selected_job(self) -> Job | None:
             item = self.queue.currentItem()
@@ -537,7 +622,7 @@ def run_gui() -> int:
 
             assert job is not None
             window = PreviewWindow(
-                job.source_path, job.output_path, self.paths.preview_cache, parent=self
+                job.source_path, job.output_path, self.preview_cache_dir, parent=self
             )
             window.show()
 

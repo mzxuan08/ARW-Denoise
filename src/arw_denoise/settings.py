@@ -16,6 +16,7 @@ class AppSettings:
     schema_version: int = SETTINGS_SCHEMA_VERSION
     default_import_dir: str | None = None
     default_output_dir: str | None = None
+    cache_parent_dir: str | None = None
     output_strategy: str = "source_subfolder"
     engine_mode: str = "auto"
     advanced_expanded: bool = False
@@ -32,6 +33,8 @@ class AppSettings:
             raise ValueError("未知导出策略")
         if self.engine_mode not in ENGINE_MODES:
             raise ValueError("未知处理引擎")
+        if self.cache_parent_dir is not None and not self.cache_parent_dir.strip():
+            raise ValueError("缓存位置不能为空")
         for name, value, maximum in (
             ("strength", self.strength, 2.0),
             ("chroma_noise", self.chroma_noise, 1.0),
@@ -58,6 +61,13 @@ def resolve_output_dir(source: Path, settings: AppSettings) -> Path:
         assert settings.default_output_dir is not None
         return Path(settings.default_output_dir).expanduser().resolve()
     return Path(source).expanduser().resolve().parent / "DNG_Denoised"
+
+
+def resolve_cache_dir(settings: AppSettings, fallback: Path) -> Path:
+    settings.validate()
+    if settings.cache_parent_dir:
+        return Path(settings.cache_parent_dir).expanduser().resolve() / "ArwDenoiseCache"
+    return Path(fallback).expanduser().resolve()
 
 
 class SettingsStore:
