@@ -65,8 +65,17 @@ $pyInstallerArgs = @(
     "--collect-binaries", "onnxruntime",
     "--hidden-import", "onnxruntime.capi._pybind_state",
     "--exclude-module", "torch",
+    "--exclude-module", "tkinter",
+    "--exclude-module", "PySide6.QtQml",
+    "--exclude-module", "PySide6.QtQuick",
+    "--exclude-module", "PySide6.QtNetwork",
+    "--exclude-module", "PySide6.QtOpenGL",
+    "--exclude-module", "PySide6.QtPdf",
+    "--exclude-module", "PySide6.QtSvg",
+    "--exclude-module", "PySide6.QtVirtualKeyboard",
     "--add-binary", "$dnglab;tools",
-    "--add-data", "$modelRoot;models\pmrid",
+    "--add-data", "$model;models\pmrid",
+    "--add-data", "$manifest;models\pmrid",
     "--add-data", "$licenses;licenses"
 )
 foreach ($component in @("cublas", "cuda_runtime", "cudnn", "cufft", "nvjitlink")) {
@@ -83,6 +92,8 @@ if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed" }
 $distribution = Join-Path $root "dist\ArwDenoise"
 Copy-Item -LiteralPath (Join-Path $root "README.md") -Destination $distribution -Force
 Copy-Item -LiteralPath (Join-Path $root "THIRD_PARTY_NOTICES.md") -Destination $distribution -Force
+& $Python (Join-Path $PSScriptRoot "audit_bundle.py") $distribution --prune --report (Join-Path $root "outputs\bundle-audit-0.3.0.json")
+if ($LASTEXITCODE -ne 0) { throw "Bundle audit failed" }
 & $Python (Join-Path $PSScriptRoot "release_manifest.py") $distribution
 if ($LASTEXITCODE -ne 0) { throw "Release manifest generation failed" }
 Write-Output "Build complete: $(Join-Path $distribution 'ArwDenoise.exe')"
