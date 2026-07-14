@@ -16,6 +16,7 @@ class AppPaths:
     database: Path
     logs: Path
     settings: Path
+    preview_cache: Path
 
     @classmethod
     def default(cls) -> "AppPaths":
@@ -25,8 +26,10 @@ class AppPaths:
             database=root / "jobs.sqlite3",
             logs=root / "logs",
             settings=root / "settings.json",
+            preview_cache=root / "preview-cache",
         )
 
     def ensure(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         self.logs.mkdir(parents=True, exist_ok=True)
+        self.preview_cache.mkdir(parents=True, exist_ok=True)
