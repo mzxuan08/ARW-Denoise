@@ -120,3 +120,30 @@ class ProgressTracker:
         if self.on_progress is not None:
             self.on_progress(event)
         return event
+
+
+class TaskController:
+    def __init__(
+        self,
+        *,
+        cancellation: CancellationToken | None = None,
+        progress_tracker: ProgressTracker | None = None,
+    ) -> None:
+        self.cancellation = cancellation or CancellationToken()
+        self.progress_tracker = progress_tracker
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self.cancellation.is_cancelled
+
+    def cancel(self) -> bool:
+        return self.cancellation.cancel()
+
+    def check(self) -> None:
+        self.cancellation.check()
+
+    def progress(self, phase: str, completed: int, total: int) -> ProgressEvent | None:
+        self.check()
+        if self.progress_tracker is None:
+            return None
+        return self.progress_tracker.update(phase, completed, total)

@@ -17,6 +17,7 @@ from .pipeline import pack_normalized_bayer, tiled_inference, unpack_normalized_
 from .postprocess import PostprocessSettings, postprocess_raw
 from .raw import RawDecoder, RawPyDecoder
 from .tile_scheduler import AdaptiveTileRunner
+from .task_control import TaskController
 
 
 @dataclass(frozen=True)
@@ -74,22 +75,38 @@ class CpuRawProcessor:
         output: Path,
         settings: ProcessingSettings | None = None,
         on_phase: Callable[[str], None] | None = None,
+        control: TaskController | None = None,
     ) -> DngLabResult:
+        control = control or TaskController()
+        control.progress("decoding", 0, 1)
         settings = settings or ProcessingSettings()
         frame = self.decoder.decode(source)
+        control.progress("decoding", 1, 1)
         if on_phase:
             on_phase("denoising")
+        control.progress("denoising", 0, 1)
         packed, context = pack_normalized_bayer(frame.pixels, frame.metadata)
         processed = tiled_inference(
             packed,
             lambda tile: self.denoiser.denoise(tile, strength=settings.strength),
             tile_size=settings.tile_size,
             overlap=settings.overlap,
+            cancellation=control.cancellation,
         )
+        control.progress("denoising", 1, 1)
+        control.progress("postprocessing", 0, 1)
         restored = unpack_normalized_bayer(processed, context, reference_pixels=frame.pixels)
+        control.progress("postprocessing", 1, 1)
         if on_phase:
             on_phase("writing")
-        return self.dnglab.write_processed_cfa(source, output, restored, frame.metadata)
+        control.progress("writing", 0, 1)
+        result = self.dnglab.write_processed_cfa(
+            source, output, restored, frame.metadata, cancellation=control.cancellation
+        )
+        control.progress("writing", 1, 1)
+        control.progress("validating", 0, 1)
+        control.progress("validating", 1, 1)
+        return result
 
 
 class SmartRawProcessor:
@@ -150,6 +167,8 @@ class SmartRawProcessor:
         automatic: AutoDenoiseConfig,
         post: PostprocessSettings,
         settings: AutoProcessingSettings,
+        control: TaskController,
+        on_progress: Callable[[int, int], None] | None,
     ) -> DenoiseResult:
         seconds = 0.0
 
@@ -170,6 +189,8 @@ class SmartRawProcessor:
             infer,
             tile_size=settings.cpu_tile_size,
             overlap=settings.cpu_overlap,
+            on_progress=on_progress,
+            cancellation=control.cancellation,
         )
         return DenoiseResult(
             packed=output,
@@ -184,20 +205,36 @@ class SmartRawProcessor:
         settings: AutoProcessingSettings | None = None,
         on_phase: Callable[[str], None] | None = None,
         on_progress: Callable[[int, int], None] | None = None,
+        control: TaskController | None = None,
     ) -> SmartProcessingResult:
+        control = control or TaskController()
+        control.progress("decoding", 0, 1)
         settings = settings or AutoProcessingSettings()
         settings.validate()
         frame = self.decoder.decode(source)
+        control.progress("decoding", 1, 1)
         packed, context = pack_normalized_bayer(frame.pixels, frame.metadata)
         automatic = tune_automatic(packed, frame.metadata)
         post = self._resolve_postprocess(automatic, settings)
         post.validate()
         if on_phase:
             on_phase("denoising")
+        control.progress("denoising", 0, 1)
+
+        best_tile_progress = 0.0
+
+        def tile_progress(completed: int, total: int) -> None:
+            nonlocal best_tile_progress
+            if on_progress is not None:
+                on_progress(completed, total)
+            fraction = completed / total
+            if fraction + 1e-12 >= best_tile_progress:
+                best_tile_progress = fraction
+                control.progress("denoising", completed, total)
 
         fallback_reason: str | None = None
         if settings.mode == "cpu":
-            denoised = self._run_cpu(packed, automatic, post, settings)
+            denoised = self._run_cpu(packed, automatic, post, settings, control, tile_progress)
         else:
             try:
                 if self._gpu_runner is None:
@@ -208,9 +245,17 @@ class SmartRawProcessor:
                         effective_iso=automatic.effective_iso,
                         strength=1.0,
                     ),
-                    on_progress=on_progress,
+                    on_progress=tile_progress,
+                    cancellation=control.cancellation,
                 )
-                processed = postprocess_raw(packed, model_result.packed, post)
+                control.progress("denoising", 1, 1)
+                control.progress("postprocessing", 0, 1)
+                processed = postprocess_raw(
+                    packed,
+                    model_result.packed,
+                    post,
+                    cancellation=control.cancellation,
+                )
                 denoised = DenoiseResult(
                     packed=processed,
                     engine=model_result.engine,
@@ -220,12 +265,24 @@ class SmartRawProcessor:
                 if settings.mode == "gpu":
                     raise
                 fallback_reason = str(exc)
-                denoised = self._run_cpu(packed, automatic, post, settings)
+                denoised = self._run_cpu(packed, automatic, post, settings, control, tile_progress)
 
+        control.progress("denoising", 1, 1)
+        control.progress("postprocessing", 1, 1)
         restored = unpack_normalized_bayer(denoised.packed, context, reference_pixels=frame.pixels)
         if on_phase:
             on_phase("writing")
-        dng_result = self.dnglab.write_processed_cfa(source, output, restored, frame.metadata)
+        control.progress("writing", 0, 1)
+        dng_result = self.dnglab.write_processed_cfa(
+            source,
+            output,
+            restored,
+            frame.metadata,
+            cancellation=control.cancellation,
+        )
+        control.progress("writing", 1, 1)
+        control.progress("validating", 0, 1)
+        control.progress("validating", 1, 1)
         return SmartProcessingResult(
             dng=dng_result,
             engine=denoised.engine,

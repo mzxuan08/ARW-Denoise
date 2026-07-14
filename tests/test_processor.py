@@ -22,7 +22,7 @@ class FakeWriter:
     def __init__(self):
         self.pixels = None
 
-    def write_processed_cfa(self, source, output, pixels, metadata):
+    def write_processed_cfa(self, source, output, pixels, metadata, cancellation=None):
         self.pixels = pixels.copy()
         return DngLabResult(Path(output), "fake", {"valid": True})
 
@@ -43,4 +43,3 @@ def test_cpu_processor_keeps_integer_cfa_and_reduces_noise(tmp_path: Path):
     assert writer.pixels.dtype == np.uint16
     assert writer.pixels.shape == pixels.shape
     assert float(np.var(writer.pixels.astype(float) - clean)) < float(np.var(pixels.astype(float) - clean))
-

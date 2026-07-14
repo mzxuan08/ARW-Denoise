@@ -10,6 +10,7 @@ from arw_denoise.domain import RawFrame, RawMetadata
 from arw_denoise.engines import DenoiseResult, EngineInfo, EngineRunStats
 from arw_denoise.onnx_engine import GpuRuntimeError
 from arw_denoise.processor import AutoProcessingSettings, SmartRawProcessor
+from arw_denoise.task_control import ProcessingCancelled, ProgressTracker, TaskController
 
 
 class FakeDecoder:
@@ -27,7 +28,7 @@ class FakeWriter:
     def __init__(self):
         self.pixels: np.ndarray | None = None
 
-    def write_processed_cfa(self, source, output, pixels, metadata):
+    def write_processed_cfa(self, source, output, pixels, metadata, cancellation=None):
         self.pixels = pixels.copy()
         return DngLabResult(Path(output), "fake", {"valid": True})
 
@@ -38,10 +39,14 @@ class FakeGpuRunner:
         self.error = error
         self.request = None
 
-    def run(self, request, on_progress=None):
+    def run(self, request, on_progress=None, cancellation=None):
         self.request = request
+        if cancellation is not None:
+            cancellation.check()
         if self.error:
             raise self.error
+        if on_progress:
+            on_progress(1, 1)
         output = self.output if self.output is not None else request.packed
         return DenoiseResult(
             packed=output.astype(np.float32),
@@ -146,4 +151,42 @@ def test_advanced_overrides_replace_only_selected_auto_values(tmp_path: Path) ->
     assert result.postprocess.strength == 0.25
     assert result.postprocess.detail_protection == 0.9
     assert result.postprocess.chroma_noise == result.automatic.chroma_noise
+
+
+def test_smart_processor_reports_all_weighted_phases(tmp_path: Path) -> None:
+    pixels, metadata = _fixture(tmp_path)
+    events = []
+    control = TaskController(
+        progress_tracker=ProgressTracker(job_id=3, on_progress=events.append)
+    )
+    SmartRawProcessor(
+        decoder=FakeDecoder(pixels, metadata),
+        dnglab=FakeWriter(),
+        gpu_runner=FakeGpuRunner(),
+    ).process(metadata.path, tmp_path / "out.dng", control=control)
+    assert events[-1].overall == 1.0
+    assert {event.phase for event in events} == {
+        "decoding", "denoising", "postprocessing", "writing", "validating"
+    }
+    assert [event.overall for event in events] == sorted(event.overall for event in events)
+
+
+def test_smart_processor_cancelled_during_gpu_does_not_write(tmp_path: Path) -> None:
+    pixels, metadata = _fixture(tmp_path)
+    writer = FakeWriter()
+    control = TaskController()
+
+    class CancellingRunner(FakeGpuRunner):
+        def run(self, request, on_progress=None, cancellation=None):
+            cancellation.cancel()
+            cancellation.check()
+
+    processor = SmartRawProcessor(
+        decoder=FakeDecoder(pixels, metadata),
+        dnglab=writer,
+        gpu_runner=CancellingRunner(),
+    )
+    with pytest.raises(ProcessingCancelled):
+        processor.process(metadata.path, tmp_path / "out.dng", control=control)
+    assert writer.pixels is None
 

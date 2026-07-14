@@ -8,6 +8,7 @@ from arw_denoise.task_control import (
     CancellationToken,
     ProcessingCancelled,
     ProgressTracker,
+    TaskController,
 )
 
 
@@ -63,3 +64,14 @@ def test_phase_weights_must_be_unique_positive_and_sum_to_one() -> None:
         ProgressTracker(job_id=1, phase_weights=(("a", 1.0), ("b", 0.0)))
     with pytest.raises(ValueError, match="1"):
         ProgressTracker(job_id=1, phase_weights=(("a", 0.2), ("b", 0.2)))
+
+
+def test_task_controller_combines_checkpoint_and_progress() -> None:
+    events = []
+    tracker = ProgressTracker(job_id=9, phase_weights=(("work", 1.0),), on_progress=events.append)
+    controller = TaskController(progress_tracker=tracker)
+    controller.progress("work", 1, 2)
+    assert events[-1].overall == 0.5
+    controller.cancel()
+    with pytest.raises(ProcessingCancelled):
+        controller.check()

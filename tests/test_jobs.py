@@ -90,3 +90,44 @@ def test_legacy_database_is_migrated_with_empty_runtime_statistics(tmp_path: Pat
     assert job.engine_id is None
     assert job.provider is None
     assert job.inference_seconds is None
+    assert job.phase is None
+    assert job.overall_progress == 0.0
+    assert job.cancelled_at is None
+
+
+def test_progress_and_resource_peaks_are_persisted(tmp_path: Path):
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    job = store.add(tmp_path / "a.ARW", tmp_path / "a.dng")
+    updated = store.record_progress(
+        job.id,
+        phase="denoising",
+        phase_progress=0.5,
+        overall_progress=0.35,
+        elapsed_seconds=4.2,
+    )
+    assert updated.phase == "denoising"
+    assert updated.phase_progress == pytest.approx(0.5)
+    assert updated.overall_progress == pytest.approx(0.35)
+    assert updated.elapsed_seconds == pytest.approx(4.2)
+    measured = store.record_runtime(
+        job.id,
+        engine_id="onnx-pmrid",
+        model_version="1.0.0",
+        provider="CUDAExecutionProvider",
+        tile_size=1024,
+        inference_seconds=3.1,
+        fallback_reason=None,
+        peak_ram_mb=900.0,
+        peak_vram_mb=2300.0,
+    )
+    assert measured.peak_ram_mb == pytest.approx(900.0)
+    assert measured.peak_vram_mb == pytest.approx(2300.0)
+
+
+def test_user_cancel_is_timestamped_and_retry_clears_cancel_marker(tmp_path: Path):
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    job = store.add(tmp_path / "a.ARW", tmp_path / "a.dng")
+    cancelled = store.transition(job.id, "cancelled")
+    assert cancelled.cancelled_at is not None
+    retried = store.transition(job.id, "queued")
+    assert retried.cancelled_at is None

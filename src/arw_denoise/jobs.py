@@ -42,6 +42,13 @@ class Job:
     tile_size: int | None
     inference_seconds: float | None
     fallback_reason: str | None
+    phase: str | None
+    phase_progress: float
+    overall_progress: float
+    elapsed_seconds: float
+    peak_ram_mb: float | None
+    peak_vram_mb: float | None
+    cancelled_at: str | None
     created_at: str
     updated_at: str
 
@@ -99,6 +106,13 @@ class JobStore:
             "tile_size": "INTEGER",
             "inference_seconds": "REAL",
             "fallback_reason": "TEXT",
+            "phase": "TEXT",
+            "phase_progress": "REAL NOT NULL DEFAULT 0",
+            "overall_progress": "REAL NOT NULL DEFAULT 0",
+            "elapsed_seconds": "REAL NOT NULL DEFAULT 0",
+            "peak_ram_mb": "REAL",
+            "peak_vram_mb": "REAL",
+            "cancelled_at": "TEXT",
         }
         for name, sql_type in columns.items():
             if name not in existing:
@@ -146,6 +160,13 @@ class JobStore:
                 float(row["inference_seconds"]) if row["inference_seconds"] is not None else None
             ),
             fallback_reason=row["fallback_reason"],
+            phase=row["phase"],
+            phase_progress=float(row["phase_progress"] or 0.0),
+            overall_progress=float(row["overall_progress"] or 0.0),
+            elapsed_seconds=float(row["elapsed_seconds"] or 0.0),
+            peak_ram_mb=float(row["peak_ram_mb"]) if row["peak_ram_mb"] is not None else None,
+            peak_vram_mb=float(row["peak_vram_mb"]) if row["peak_vram_mb"] is not None else None,
+            cancelled_at=row["cancelled_at"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -210,15 +231,17 @@ class JobStore:
         if new_state not in STATES:
             raise ValueError("未知任务状态")
         with self._connect() as db:
-            row = db.execute("SELECT state FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            row = db.execute("SELECT state, cancelled_at FROM jobs WHERE id = ?", (job_id,)).fetchone()
             if row is None:
                 raise KeyError(job_id)
             current = row["state"]
             if new_state not in ALLOWED_TRANSITIONS[current]:
                 raise ValueError(f"非法状态转换：{current} -> {new_state}")
+            now = _now()
+            cancelled_at = now if new_state == "cancelled" else (None if new_state == "queued" else row["cancelled_at"])
             db.execute(
-                "UPDATE jobs SET state = ?, error = ?, updated_at = ? WHERE id = ?",
-                (new_state, error, _now(), job_id),
+                "UPDATE jobs SET state = ?, error = ?, cancelled_at = ?, updated_at = ? WHERE id = ?",
+                (new_state, error, cancelled_at, now, job_id),
             )
             updated = db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
         assert updated is not None
@@ -234,13 +257,16 @@ class JobStore:
         tile_size: int | None,
         inference_seconds: float,
         fallback_reason: str | None,
+        peak_ram_mb: float | None = None,
+        peak_vram_mb: float | None = None,
     ) -> Job:
         if inference_seconds < 0:
             raise ValueError("推理耗时不能为负数")
         with self._connect() as db:
             cursor = db.execute(
                 """UPDATE jobs SET engine_id = ?, model_version = ?, provider = ?, tile_size = ?,
-                inference_seconds = ?, fallback_reason = ?, updated_at = ? WHERE id = ?""",
+                inference_seconds = ?, fallback_reason = ?, peak_ram_mb = ?, peak_vram_mb = ?,
+                updated_at = ? WHERE id = ?""",
                 (
                     engine_id,
                     model_version,
@@ -248,12 +274,46 @@ class JobStore:
                     tile_size,
                     inference_seconds,
                     fallback_reason,
+                    peak_ram_mb,
+                    peak_vram_mb,
                     _now(),
                     job_id,
                 ),
             )
             if cursor.rowcount != 1:
                 raise KeyError(job_id)
+            row = db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        assert row is not None
+        return self._row(row)
+
+    def record_progress(
+        self,
+        job_id: int,
+        *,
+        phase: str,
+        phase_progress: float,
+        overall_progress: float,
+        elapsed_seconds: float,
+    ) -> Job:
+        if not phase:
+            raise ValueError("处理阶段不能为空")
+        if not 0.0 <= phase_progress <= 1.0 or not 0.0 <= overall_progress <= 1.0:
+            raise ValueError("任务进度必须在 0–1 之间")
+        if elapsed_seconds < 0:
+            raise ValueError("已用时间不能为负数")
+        with self._connect() as db:
+            existing = db.execute(
+                "SELECT overall_progress FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if existing is None:
+                raise KeyError(job_id)
+            if overall_progress + 1e-12 < float(existing["overall_progress"] or 0.0):
+                raise ValueError("任务总进度不能倒退")
+            db.execute(
+                """UPDATE jobs SET phase = ?, phase_progress = ?, overall_progress = ?,
+                elapsed_seconds = ?, updated_at = ? WHERE id = ?""",
+                (phase, phase_progress, overall_progress, elapsed_seconds, _now(), job_id),
+            )
             row = db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
         assert row is not None
         return self._row(row)
