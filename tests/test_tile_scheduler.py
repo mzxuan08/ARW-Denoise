@@ -5,6 +5,7 @@ import pytest
 
 from arw_denoise.engines import DenoiseRequest, DenoiseResult, EngineInfo, EngineRunStats
 from arw_denoise.onnx_engine import GpuRuntimeError
+from arw_denoise.task_control import CancellationToken, ProcessingCancelled
 from arw_denoise.tile_scheduler import (
     AdaptiveTileRunner,
     GpuFallbackRequired,
@@ -126,4 +127,33 @@ def test_adaptive_runner_requests_cpu_fallback_after_all_oom_sizes() -> None:
 def test_cuda_oom_detection_requires_cuda_context() -> None:
     assert is_cuda_oom(GpuRuntimeError("CUDA_ERROR_OUT_OF_MEMORY"))
     assert not is_cuda_oom(MemoryError("out of memory"))
+
+
+def test_cancelled_oom_does_not_retry_smaller_tile_or_request_cpu_fallback() -> None:
+    token = CancellationToken()
+    factories = 0
+
+    class CancellingOomEngine(RecordingEngine):
+        def run(self, request):
+            token.cancel()
+            raise GpuRuntimeError("CUDA out of memory while allocating tensor")
+
+    def factory():
+        nonlocal factories
+        factories += 1
+        return CancellingOomEngine([])
+
+    runner = AdaptiveTileRunner(
+        factory,
+        memory_total_mb=8192,
+        recommended_size=1024,
+        minimum_size=256,
+        overlap=64,
+    )
+    with pytest.raises(ProcessingCancelled):
+        runner.run(
+            DenoiseRequest(np.zeros((600, 600, 4), np.float32), effective_iso=1600),
+            cancellation=token,
+        )
+    assert factories == 1
 

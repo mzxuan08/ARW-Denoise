@@ -5,6 +5,7 @@ import pytest
 
 from arw_denoise.domain import RawMetadata, UnsupportedRawError
 from arw_denoise.pipeline import pack_normalized_bayer, tiled_inference, unpack_normalized_bayer
+from arw_denoise.task_control import CancellationToken, ProcessingCancelled
 
 
 def metadata() -> RawMetadata:
@@ -66,6 +67,42 @@ def test_tiled_inference_reports_progress():
     )
     assert progress[-1][0] == progress[-1][1]
     assert [item[0] for item in progress] == list(range(1, progress[-1][1] + 1))
+
+
+def test_tiled_inference_stops_before_start_when_cancelled():
+    token = CancellationToken()
+    token.cancel()
+    calls = []
+    with pytest.raises(ProcessingCancelled):
+        tiled_inference(
+            np.zeros((80, 80, 4), np.float32),
+            lambda tile: calls.append(tile) or tile,
+            tile_size=48,
+            overlap=8,
+            cancellation=token,
+        )
+    assert calls == []
+
+
+def test_tiled_inference_does_not_start_next_tile_after_cancellation():
+    token = CancellationToken()
+    calls = 0
+
+    def infer(tile):
+        nonlocal calls
+        calls += 1
+        token.cancel()
+        return tile
+
+    with pytest.raises(ProcessingCancelled):
+        tiled_inference(
+            np.zeros((80, 80, 4), np.float32),
+            infer,
+            tile_size=48,
+            overlap=8,
+            cancellation=token,
+        )
+    assert calls == 1
 
 
 def test_metadata_rejects_non_bayer_color_layout():

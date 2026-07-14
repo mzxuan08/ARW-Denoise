@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from arw_denoise.postprocess import PostprocessSettings, postprocess_raw
+from arw_denoise.task_control import CancellationToken, ProcessingCancelled
 
 
 def test_identity_model_output_remains_exactly_unchanged() -> None:
@@ -89,4 +90,24 @@ def test_postprocess_preserves_channel_means_and_safe_range() -> None:
 def test_postprocess_rejects_invalid_settings(settings: PostprocessSettings) -> None:
     with pytest.raises(ValueError):
         postprocess_raw(np.zeros((8, 8, 4), np.float32), np.zeros((8, 8, 4), np.float32), settings)
+
+
+def test_postprocess_checks_cancellation_between_stages() -> None:
+    token = CancellationToken()
+    checks = 0
+    original_check = token.check
+
+    def check() -> None:
+        nonlocal checks
+        checks += 1
+        if checks == 3:
+            token.cancel()
+        original_check()
+
+    token.check = check  # type: ignore[method-assign]
+    original = np.full((64, 64, 4), 0.3, np.float32)
+    prediction = np.full((64, 64, 4), 0.28, np.float32)
+    with pytest.raises(ProcessingCancelled):
+        postprocess_raw(original, prediction, PostprocessSettings(), cancellation=token)
+    assert checks == 3
 

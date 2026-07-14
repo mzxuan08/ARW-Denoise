@@ -9,6 +9,7 @@ import numpy as np
 from .engines import DenoiseRequest, DenoiseResult, EngineInfo, EngineRunStats, RawDenoiseEngine
 from .onnx_engine import GpuRuntimeError
 from .pipeline import tiled_inference
+from .task_control import CancellationToken
 
 
 class GpuFallbackRequired(GpuRuntimeError):
@@ -106,8 +107,11 @@ class AdaptiveTileRunner:
         request: DenoiseRequest,
         *,
         on_progress: Callable[[int, int], None] | None = None,
+        cancellation: CancellationToken | None = None,
     ) -> DenoiseResult:
         request.validate()
+        if cancellation is not None:
+            cancellation.check()
         sizes = choose_tile_sizes(
             self.memory_total_mb,
             recommended_size=self.recommended_size,
@@ -116,6 +120,8 @@ class AdaptiveTileRunner:
         attempted: list[int] = []
         last_oom: BaseException | None = None
         for tile_size in sizes:
+            if cancellation is not None:
+                cancellation.check()
             attempted.append(tile_size)
             engine = self.engine_factory()
             inference_seconds = 0.0
@@ -123,6 +129,8 @@ class AdaptiveTileRunner:
 
             def infer(tile: np.ndarray) -> np.ndarray:
                 nonlocal inference_seconds, engine_info
+                if cancellation is not None:
+                    cancellation.check()
                 padded, original_shape = _pad_model_tile(tile)
                 tile_result = engine.run(
                     DenoiseRequest(
@@ -131,6 +139,8 @@ class AdaptiveTileRunner:
                         strength=request.strength,
                     )
                 )
+                if cancellation is not None:
+                    cancellation.check()
                 inference_seconds += tile_result.stats.inference_seconds
                 engine_info = tile_result.engine
                 height, width = original_shape
@@ -143,8 +153,11 @@ class AdaptiveTileRunner:
                     tile_size=tile_size,
                     overlap=self.overlap,
                     on_progress=on_progress,
+                    cancellation=cancellation,
                 )
             except Exception as exc:
+                if cancellation is not None:
+                    cancellation.check()
                 if not is_cuda_oom(exc):
                     raise
                 last_oom = exc

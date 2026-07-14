@@ -5,6 +5,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .task_control import CancellationToken
+
 
 @dataclass(frozen=True)
 class PostprocessSettings:
@@ -93,19 +95,31 @@ def postprocess_raw(
     original: np.ndarray,
     model_output: np.ndarray,
     settings: PostprocessSettings,
+    *,
+    cancellation: CancellationToken | None = None,
 ) -> np.ndarray:
     settings.validate()
     _validate_images(original, model_output)
+    if cancellation is not None:
+        cancellation.check()
     source = original.astype(np.float32, copy=False)
     prediction = model_output.astype(np.float32, copy=False)
     if np.array_equal(source, prediction) or settings.strength == 0.0:
         return source.copy()
     delta = prediction - source
     delta = _control_chroma(delta, settings.chroma_noise)
+    if cancellation is not None:
+        cancellation.check()
     delta = _suppress_delta_spikes(delta, settings.artifact_suppression)
+    if cancellation is not None:
+        cancellation.check()
     delta *= _edge_weight(source, settings.detail_protection)[:, :, None]
+    if cancellation is not None:
+        cancellation.check()
     result = np.clip(source + settings.strength * delta, 0.0, 1.0)
     result = _preserve_channel_means(result, source)
+    if cancellation is not None:
+        cancellation.check()
     if not np.isfinite(result).all():
         raise ValueError("RAW 后处理结果包含 NaN 或无穷值")
     return result

@@ -6,6 +6,7 @@ from typing import Callable
 import numpy as np
 
 from .domain import RawMetadata, UnsupportedRawError
+from .task_control import CancellationToken
 
 
 @dataclass(frozen=True)
@@ -80,15 +81,20 @@ def tiled_inference(
     tile_size: int = 1024,
     overlap: int = 64,
     on_progress: Callable[[int, int], None] | None = None,
+    cancellation: CancellationToken | None = None,
 ) -> np.ndarray:
     """Run HWC inference with overlap-add blending and no hard seams."""
     if image.ndim != 3:
         raise ValueError("image 必须是 HxWxC")
     if tile_size <= overlap * 2:
         raise ValueError("tile_size 必须大于两倍 overlap")
+    if cancellation is not None:
+        cancellation.check()
     height, width, channels = image.shape
     if height <= tile_size and width <= tile_size:
         result = infer(image)
+        if cancellation is not None:
+            cancellation.check()
         if result.shape != image.shape:
             raise ValueError("模型输出尺寸与输入不一致")
         if on_progress:
@@ -117,9 +123,13 @@ def tiled_inference(
     for top in top_positions:
         bottom = min(height, top + tile_size)
         for left in left_positions:
+            if cancellation is not None:
+                cancellation.check()
             right = min(width, left + tile_size)
             tile = image[top:bottom, left:right]
             prediction = infer(tile)
+            if cancellation is not None:
+                cancellation.check()
             if prediction.shape != tile.shape:
                 raise ValueError("模型输出尺寸与输入分块不一致")
             window = np.ones((bottom - top, right - left), dtype=np.float32)
