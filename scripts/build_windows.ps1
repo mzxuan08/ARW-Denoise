@@ -83,4 +83,6 @@ if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed" }
 $distribution = Join-Path $root "dist\ArwDenoise"
 Copy-Item -LiteralPath (Join-Path $root "README.md") -Destination $distribution -Force
 Copy-Item -LiteralPath (Join-Path $root "THIRD_PARTY_NOTICES.md") -Destination $distribution -Force
+& $Python (Join-Path $PSScriptRoot "release_manifest.py") $distribution
+if ($LASTEXITCODE -ne 0) { throw "Release manifest generation failed" }
 Write-Output "Build complete: $(Join-Path $distribution 'ArwDenoise.exe')"

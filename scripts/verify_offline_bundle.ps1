@@ -5,6 +5,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 $distributionPath = [System.IO.Path]::GetFullPath($Distribution)
+$python = Get-Command python -ErrorAction Stop
+& $python.Source (Join-Path $PSScriptRoot "release_manifest.py") $distributionPath --verify
+if ($LASTEXITCODE -ne 0) { throw "Release manifest verification failed" }
 $executable = Join-Path $distributionPath "ArwDenoise.exe"
 $required = @(
     $executable,
