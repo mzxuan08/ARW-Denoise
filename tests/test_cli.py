@@ -32,3 +32,13 @@ def test_smart_process_cli_accepts_advanced_overrides() -> None:
 def test_gpu_probe_cli_command() -> None:
     assert build_parser().parse_args(["gpu-probe"]).command == "gpu-probe"
 
+
+def test_scan_cli_accepts_multiple_sources_and_report_options() -> None:
+    args = build_parser().parse_args(
+        ["scan", "card", "one.ARW", "--workers", "3", "--report", "report.json"]
+    )
+    assert args.command == "scan"
+    assert args.sources == [Path("card"), Path("one.ARW")]
+    assert args.workers == 3
+    assert args.report == Path("report.json")
+

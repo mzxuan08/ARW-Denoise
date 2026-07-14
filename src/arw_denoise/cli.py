@@ -6,6 +6,7 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
+from .compatibility import discover_arw_files, scan_arw_files, write_compatibility_report
 from .config import AppPaths
 from .dnglab import DngLabClient
 from .domain import ArwDenoiseError
@@ -22,6 +23,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("gui", help="启动桌面界面")
     probe = sub.add_parser("probe", help="读取 RAW 元数据但不处理像素")
     probe.add_argument("source", type=Path)
+    scan = sub.add_parser("scan", help="批量预检 Sony ARW 兼容性")
+    scan.add_argument("sources", type=Path, nargs="+")
+    scan.add_argument("--workers", type=int, default=2)
+    scan.add_argument("--report", type=Path)
+    scan.add_argument("--no-recursive", action="store_true")
     convert = sub.add_parser("dng-convert", help="建立未经降噪的 dnglab 兼容 DNG")
     convert.add_argument("source", type=Path)
     convert.add_argument("output", type=Path)
@@ -58,6 +64,39 @@ def main(argv: list[str] | None = None) -> int:
             data["path"] = str(data["path"])
             print(json.dumps(data, ensure_ascii=False, indent=2))
             return 0
+        if args.command == "scan":
+            paths: list[Path] = []
+            seen: set[str] = set()
+            for source in args.sources:
+                candidates = (
+                    discover_arw_files(source, recursive=not args.no_recursive)
+                    if source.is_dir()
+                    else [source.expanduser().resolve()]
+                )
+                for candidate in candidates:
+                    key = str(candidate).casefold()
+                    if key not in seen:
+                        seen.add(key)
+                        paths.append(candidate)
+            if not paths:
+                raise ValueError("没有找到可预检的 ARW 文件")
+            results = scan_arw_files(paths, max_workers=args.workers)
+            supported = sum(result.supported for result in results)
+            report = write_compatibility_report(results, args.report) if args.report else None
+            print(
+                json.dumps(
+                    {
+                        "total": len(results),
+                        "supported": supported,
+                        "unsupported": len(results) - supported,
+                        "report": str(report) if report else None,
+                        "files": [result.to_document() for result in results],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 0 if supported == len(results) else 4
         if args.command == "dng-convert":
             result = DngLabClient(args.dnglab).compatibility_convert(args.source, args.output)
             print(json.dumps({"output": str(result.output), "dnglab": result.version}, ensure_ascii=False, indent=2))

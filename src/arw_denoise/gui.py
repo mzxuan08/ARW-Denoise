@@ -6,6 +6,13 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 from .cache_storage import cache_usage, clear_managed_cache, ensure_managed_cache
+from .compatibility import (
+    CompatibilityResult,
+    discover_arw_files,
+    scan_arw_files,
+    source_snapshot,
+    write_compatibility_report,
+)
 from .config import AppPaths
 from .dnglab import DngLabClient
 from .gpu_probe import create_default_gpu_probe
@@ -16,6 +23,7 @@ from .gui_helpers import (
     open_in_explorer,
     progress_eta,
     queue_progress,
+    source_summary,
 )
 from .jobs import Job, JobStore
 from .metrics import ResourceMonitor
@@ -200,6 +208,27 @@ def run_gui() -> int:
             finally:
                 self.finished.emit()
 
+    class ScanWorker(QObject):
+        completed = Signal(object)
+        failed = Signal(str)
+        finished = Signal()
+
+        def __init__(self, paths: list[Path], report: Path):
+            super().__init__()
+            self.paths = paths
+            self.report = report
+
+        @Slot()
+        def run(self) -> None:
+            try:
+                results = scan_arw_files(self.paths, max_workers=2)
+                report = write_compatibility_report(results, self.report)
+                self.completed.emit((results, report))
+            except Exception as exc:
+                self.failed.emit(str(exc))
+            finally:
+                self.finished.emit()
+
     class MainWindow(QMainWindow):
         def __init__(self) -> None:
             super().__init__()
@@ -220,6 +249,8 @@ def run_gui() -> int:
             self.worker = None
             self.probe_thread = None
             self.probe_worker = None
+            self.scan_thread = None
+            self.scan_worker = None
             self._close_after_processing = False
 
             splitter = QSplitter()
@@ -276,12 +307,15 @@ def run_gui() -> int:
             title = QLabel("来源与任务")
             title.setStyleSheet("font-size: 18px; font-weight: 600")
             layout.addWidget(title)
-            add_files = QPushButton("添加 ARW 文件")
-            add_files.clicked.connect(self.add_files)
-            layout.addWidget(add_files)
-            add_folder = QPushButton("添加文件夹")
-            add_folder.clicked.connect(self.add_folder)
-            layout.addWidget(add_folder)
+            self.add_files_button = QPushButton("扫描并添加 ARW")
+            self.add_files_button.clicked.connect(self.add_files)
+            layout.addWidget(self.add_files_button)
+            self.add_folder_button = QPushButton("递归扫描并添加文件夹")
+            self.add_folder_button.clicked.connect(self.add_folder)
+            layout.addWidget(self.add_folder_button)
+            scan_report = QPushButton("打开最近预检报告")
+            scan_report.clicked.connect(self.open_scan_report)
+            layout.addWidget(scan_report)
             retry = QPushButton("重试失败任务")
             retry.clicked.connect(self.retry_failed)
             layout.addWidget(retry)
@@ -552,38 +586,111 @@ def run_gui() -> int:
             except (KeyError, TypeError, ValueError):
                 return None
 
-        def _enqueue(self, paths: list[Path]) -> None:
-            if not paths:
+        def _enqueue(self, results: list[CompatibilityResult]) -> None:
+            if not results:
                 return
+            paths = [result.path for result in results]
             self.import_dir.setText(str(paths[0].parent.resolve()))
             self.save_settings()
             settings = self._current_settings()
-            parameters = job_parameters(settings)
-            for path in paths:
+            base_parameters = job_parameters(settings)
+            for result in results:
+                parameters = dict(base_parameters)
+                if result.metadata is not None:
+                    parameters["_source"] = source_snapshot(result.metadata)
                 self.store.add_with_available_output(
-                    path,
-                    resolve_output_dir(path, settings),
+                    result.path,
+                    resolve_output_dir(result.path, settings),
                     mode=settings.engine_mode,
                     parameters=parameters,
                 )
             self.refresh()
 
+        def _start_preflight(self, paths: list[Path]) -> None:
+            if not paths:
+                return
+            if self.scan_thread is not None and self.scan_thread.isRunning():
+                self.statusBar().showMessage("已有兼容性预检正在运行", 5000)
+                return
+            self.add_files_button.setEnabled(False)
+            self.add_folder_button.setEnabled(False)
+            self.start_button.setEnabled(False)
+            self.statusBar().showMessage(f"正在预检 {len(paths)} 个 Sony ARW…")
+            self.scan_thread = QThread(self)
+            self.scan_worker = ScanWorker(
+                paths,
+                self.preview_cache_dir / "compatibility-report-latest.json",
+            )
+            self.scan_worker.moveToThread(self.scan_thread)
+            self.scan_thread.started.connect(self.scan_worker.run)
+            self.scan_worker.completed.connect(self._scan_completed)
+            self.scan_worker.failed.connect(self._scan_failed)
+            self.scan_worker.finished.connect(self.scan_thread.quit)
+            self.scan_worker.finished.connect(self.scan_worker.deleteLater)
+            self.scan_thread.finished.connect(self._scan_finished)
+            self.scan_thread.finished.connect(self.scan_thread.deleteLater)
+            self.scan_thread.start()
+
+        @Slot(object)
+        def _scan_completed(self, payload) -> None:
+            results, report = payload
+            supported = [result for result in results if result.supported]
+            unsupported = [result for result in results if not result.supported]
+            self._enqueue(supported)
+            self.statusBar().showMessage(
+                f"预检完成：兼容 {len(supported)} 个，不兼容 {len(unsupported)} 个 · {report}",
+                15000,
+            )
+            if unsupported:
+                details = "\n".join(
+                    f"{result.path.name}：{result.error}" for result in unsupported[:6]
+                )
+                if len(unsupported) > 6:
+                    details += f"\n…另有 {len(unsupported) - 6} 个，详见预检报告"
+                QMessageBox.warning(
+                    self,
+                    "部分 ARW 不兼容",
+                    f"这些文件未加入队列：\n\n{details}\n\n完整报告：{report}",
+                )
+
+        @Slot(str)
+        def _scan_failed(self, message: str) -> None:
+            QMessageBox.warning(self, "兼容性预检失败", message)
+
+        @Slot()
+        def _scan_finished(self) -> None:
+            self.scan_worker = None
+            self.scan_thread = None
+            self.add_files_button.setEnabled(True)
+            self.add_folder_button.setEnabled(True)
+            self.refresh()
+
         def add_files(self) -> None:
             start = self.import_dir.text().strip()
             files, _ = QFileDialog.getOpenFileNames(self, "选择 Sony ARW", start, "Sony RAW (*.ARW *.arw)")
-            self._enqueue([Path(value) for value in files])
+            self._start_preflight([Path(value) for value in files])
 
         def add_folder(self) -> None:
             start = self.import_dir.text().strip()
             folder = QFileDialog.getExistingDirectory(self, "选择包含 ARW 的文件夹", start)
             if not folder:
                 return
-            root = Path(folder)
-            files = sorted({*root.glob("*.ARW"), *root.glob("*.arw")})
-            if not files:
-                QMessageBox.information(self, "未找到文件", "所选文件夹中没有 ARW 文件。")
+            try:
+                files = discover_arw_files(Path(folder), recursive=True)
+            except (OSError, ValueError) as exc:
+                QMessageBox.warning(self, "无法扫描文件夹", str(exc))
                 return
-            self._enqueue(files)
+            if not files:
+                QMessageBox.information(self, "未找到文件", "所选文件夹及其子目录中没有 ARW 文件。")
+                return
+            self._start_preflight(files)
+
+        def open_scan_report(self) -> None:
+            report = self.preview_cache_dir / "compatibility-report-latest.json"
+            try:
+                open_in_explorer(report, select_file=True)
+            except (OSError, ValueError) as exc:
+                QMessageBox.information(self, "暂无预检报告", str(exc))
 
         def open_output_folder(self) -> None:
             try:
@@ -633,9 +740,10 @@ def run_gui() -> int:
             self.queue.clear()
             states = {"queued": "等待", "decoding": "解码", "denoising": "降噪", "writing": "写入", "validating": "验证", "completed": "完成", "failed": "失败", "cancelled": "已取消"}
             for job in jobs:
-                detail = ""
+                source_detail = source_summary(job.parameters)
+                detail = f"  · {source_detail}" if source_detail else ""
                 if job.provider:
-                    detail = f"  · {job.provider} · {job.inference_seconds or 0:.2f}s"
+                    detail += f"  · {job.provider} · {job.inference_seconds or 0:.2f}s"
                     if job.tile_size:
                         detail += f" · tile {job.tile_size}"
                     if job.peak_ram_mb is not None:
@@ -679,7 +787,8 @@ def run_gui() -> int:
                     f"{active.source_path.name} · {phase_name} · 已用 {format_duration(active.elapsed_seconds)} · 剩余约 {eta_text}"
                 )
             running = self.thread is not None and self.thread.isRunning()
-            self.start_button.setEnabled(not running and queued > 0)
+            scanning = self.scan_thread is not None and self.scan_thread.isRunning()
+            self.start_button.setEnabled(not running and not scanning and queued > 0)
             self._refresh_preview_button()
 
         def retry_failed(self) -> None:
@@ -786,6 +895,11 @@ def run_gui() -> int:
                 if self.worker:
                     self.worker.cancel()
                 self.statusBar().showMessage("正在终止当前处理并清理临时文件，请稍候…")
+                event.ignore()
+                return
+            if self.scan_thread is not None and self.scan_thread.isRunning():
+                self.statusBar().showMessage("正在完成 ARW 兼容性预检，请稍候…")
+                QTimer.singleShot(250, self.close)
                 event.ignore()
                 return
             if self.probe_thread is not None and self.probe_thread.isRunning():

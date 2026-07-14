@@ -56,6 +56,23 @@ def job_parameters(settings: AppSettings) -> dict[str, float]:
     return {name: float(value) for name, value in values.items() if value is not None}
 
 
+def source_summary(parameters: dict) -> str:
+    source = parameters.get("_source")
+    if not isinstance(source, dict):
+        return ""
+    camera = " ".join(
+        str(value).strip() for value in (source.get("make"), source.get("model")) if value
+    )
+    fields = [camera] if camera else []
+    if source.get("iso") is not None:
+        fields.append(f"ISO {source['iso']}")
+    if source.get("width") and source.get("height"):
+        fields.append(f"{source['width']}×{source['height']}")
+    if source.get("bits_per_sample"):
+        fields.append(f"{source['bits_per_sample']} bit")
+    return " · ".join(fields)
+
+
 def explorer_arguments(path: Path, *, select_file: bool = False) -> list[str]:
     resolved = Path(path).expanduser().resolve()
     if select_file:

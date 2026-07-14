@@ -12,6 +12,7 @@ from arw_denoise.gui_helpers import (
     open_in_explorer,
     progress_eta,
     queue_progress,
+    source_summary,
 )
 from arw_denoise.settings import AppSettings
 
@@ -84,3 +85,18 @@ def test_preview_requires_completed_job_and_both_files(tmp_path: Path) -> None:
     assert can_preview(Job())
     Job.state = "failed"
     assert not can_preview(Job())
+
+
+def test_source_summary_formats_preflight_camera_metadata() -> None:
+    parameters = {
+        "_source": {
+            "make": "Sony",
+            "model": "ILCE-7CM2",
+            "iso": 400,
+            "width": 7032,
+            "height": 4688,
+            "bits_per_sample": 16,
+        }
+    }
+    assert source_summary(parameters) == "Sony ILCE-7CM2 · ISO 400 · 7032×4688 · 16 bit"
+    assert source_summary({}) == ""

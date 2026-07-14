@@ -1,7 +1,7 @@
 param(
     [string]$Distribution = "dist\ArwDenoise",
     [string]$OutputDirectory = "outputs",
-    [string]$Version = "0.4.0",
+    [string]$Version = "0.5.0",
     [string]$Python = "python",
     [switch]$SkipRuntimeVerification
 )
@@ -34,7 +34,7 @@ $parent = Split-Path -Parent $distributionPath
 $folder = Split-Path -Leaf $distributionPath
 Push-Location $parent
 try {
-    & $sevenZip a -tzip -mx=9 -mfb=258 -mpass=15 $zip $folder | Out-Null
+    & $sevenZip a -tzip -mx=7 -mfb=64 -mpass=3 -mmt=on $zip $folder | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "ZIP creation failed" }
     & $sevenZip a -t7z -m0=lzma2 -mx=9 -ms=on -mmt=on -md=256m $solid $folder | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Solid 7z creation failed" }
