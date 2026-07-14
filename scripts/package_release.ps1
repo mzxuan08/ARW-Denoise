@@ -3,6 +3,8 @@ param(
     [string]$OutputDirectory = "outputs",
     [string]$Version = "0.5.0",
     [string]$Python = "python",
+    [ValidateRange(1, 16)]
+    [int]$CompressionThreads = 4,
     [switch]$SkipRuntimeVerification
 )
 
@@ -34,9 +36,9 @@ $parent = Split-Path -Parent $distributionPath
 $folder = Split-Path -Leaf $distributionPath
 Push-Location $parent
 try {
-    & $sevenZip a -tzip -mx=7 -mfb=64 -mpass=3 -mmt=on $zip $folder | Out-Null
+    & $sevenZip a -tzip -mx=7 -mfb=64 -mpass=3 "-mmt=$CompressionThreads" $zip $folder | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "ZIP creation failed" }
-    & $sevenZip a -t7z -m0=lzma2 -mx=9 -ms=on -mmt=on -md=256m $solid $folder | Out-Null
+    & $sevenZip a -t7z -m0=lzma2 -mx=9 -ms=on "-mmt=$CompressionThreads" -md=256m $solid $folder | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Solid 7z creation failed" }
 }
 finally {
