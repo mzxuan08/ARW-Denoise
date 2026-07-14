@@ -38,6 +38,12 @@ def progress_eta(elapsed_seconds: float, overall_progress: float) -> float | Non
     return elapsed_seconds * (1.0 - overall_progress) / overall_progress
 
 
+def can_preview(job: object | None) -> bool:
+    if job is None or getattr(job, "state", None) != "completed":
+        return False
+    return Path(getattr(job, "source_path")).is_file() and Path(getattr(job, "output_path")).is_file()
+
+
 def job_parameters(settings: AppSettings) -> dict[str, float]:
     if not settings.advanced_enabled:
         return {}

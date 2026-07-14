@@ -9,6 +9,7 @@ from .config import AppPaths
 from .dnglab import DngLabClient
 from .gpu_probe import create_default_gpu_probe
 from .gui_helpers import (
+    can_preview,
     format_duration,
     job_parameters,
     open_in_explorer,
@@ -281,6 +282,10 @@ def run_gui() -> int:
             retry_cancelled = QPushButton("重试已取消任务")
             retry_cancelled.clicked.connect(self.retry_cancelled)
             layout.addWidget(retry_cancelled)
+            self.preview_button = QPushButton("对比预览")
+            self.preview_button.clicked.connect(self.open_comparison_preview)
+            self.preview_button.setEnabled(False)
+            layout.addWidget(self.preview_button)
             clear_completed = QPushButton("清理已完成记录")
             clear_completed.clicked.connect(self.clear_completed)
             layout.addWidget(clear_completed)
@@ -301,6 +306,7 @@ def run_gui() -> int:
             layout.addWidget(title)
             self.queue = QListWidget()
             self.queue.itemDoubleClicked.connect(lambda _item: self.locate_selected_output())
+            self.queue.currentItemChanged.connect(lambda *_args: self._refresh_preview_button())
             layout.addWidget(self.queue)
             return panel
 
@@ -518,6 +524,23 @@ def run_gui() -> int:
             except (OSError, ValueError) as exc:
                 QMessageBox.warning(self, "无法定位", str(exc))
 
+        def _refresh_preview_button(self) -> None:
+            if hasattr(self, "preview_button"):
+                self.preview_button.setEnabled(can_preview(self._selected_job()))
+
+        def open_comparison_preview(self) -> None:
+            job = self._selected_job()
+            if not can_preview(job):
+                QMessageBox.information(self, "无法预览", "请选中源 ARW 和降噪 DNG 都存在的已完成任务。")
+                return
+            from .preview_window import PreviewWindow
+
+            assert job is not None
+            window = PreviewWindow(
+                job.source_path, job.output_path, self.paths.preview_cache, parent=self
+            )
+            window.show()
+
         def refresh(self) -> None:
             jobs = self.store.list()
             selected = self._selected_job()
@@ -572,6 +595,7 @@ def run_gui() -> int:
                 )
             running = self.thread is not None and self.thread.isRunning()
             self.start_button.setEnabled(not running and queued > 0)
+            self._refresh_preview_button()
 
         def retry_failed(self) -> None:
             for job in self.store.list("failed"):

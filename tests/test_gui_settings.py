@@ -6,6 +6,7 @@ import pytest
 
 from arw_denoise.gui_helpers import (
     explorer_arguments,
+    can_preview,
     format_duration,
     job_parameters,
     open_in_explorer,
@@ -68,3 +69,18 @@ def test_progress_display_helpers_do_not_show_false_precision() -> None:
     assert progress_eta(4.0, 0.5) == pytest.approx(4.0)
     assert format_duration(None) == "--"
     assert format_duration(65) == "01:05"
+
+
+def test_preview_requires_completed_job_and_both_files(tmp_path: Path) -> None:
+    source, output = tmp_path / "a.ARW", tmp_path / "a.dng"
+    source.write_bytes(b"raw")
+    output.write_bytes(b"dng")
+
+    class Job:
+        state = "completed"
+        source_path = source
+        output_path = output
+
+    assert can_preview(Job())
+    Job.state = "failed"
+    assert not can_preview(Job())
