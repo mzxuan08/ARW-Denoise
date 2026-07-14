@@ -15,6 +15,7 @@ from .gui_helpers import (
     queue_progress,
 )
 from .jobs import Job, JobStore
+from .metrics import ResourceMonitor
 from .processor import AutoProcessingSettings, SmartRawProcessor
 from .settings import AppSettings, SettingsStore, resolve_output_dir
 from .task_control import ProcessingCancelled, ProgressEvent, ProgressTracker, TaskController
@@ -74,6 +75,7 @@ def run_gui() -> int:
                         self.updated.emit()
                         continue
                     try:
+                        monitor = ResourceMonitor(interval_seconds=0.5).start()
                         self.store.transition(job.id, "decoding")
                         self.updated.emit()
                         started = time.monotonic()
@@ -113,6 +115,7 @@ def run_gui() -> int:
                             on_phase=phase,
                             control=control,
                         )
+                        peaks = monitor.stop()
                         self.store.record_runtime(
                             job.id,
                             engine_id=result.engine.engine_id,
@@ -121,6 +124,8 @@ def run_gui() -> int:
                             tile_size=result.stats.tile_size,
                             inference_seconds=result.stats.inference_seconds,
                             fallback_reason=result.fallback_reason,
+                            peak_ram_mb=peaks.ram_mb,
+                            peak_vram_mb=peaks.vram_mb,
                         )
                         self.store.transition(job.id, "validating")
                         self.store.transition(job.id, "completed")
@@ -134,6 +139,9 @@ def run_gui() -> int:
                             self.store.transition(job.id, "failed", str(exc))
                         self.notice.emit(f"{job.source_path.name}: {exc}")
                     finally:
+                        if "monitor" in locals():
+                            monitor.stop()
+                            del monitor
                         with self._control_lock:
                             self._current_control = None
                     self.updated.emit()
@@ -502,6 +510,10 @@ def run_gui() -> int:
                     detail = f"  · {job.provider} · {job.inference_seconds or 0:.2f}s"
                     if job.tile_size:
                         detail += f" · tile {job.tile_size}"
+                    if job.peak_ram_mb is not None:
+                        detail += f" · RAM {job.peak_ram_mb:.0f} MB"
+                    if job.peak_vram_mb is not None:
+                        detail += f" · VRAM {job.peak_vram_mb:.0f} MB"
                 if job.fallback_reason:
                     detail += " · GPU 已回退 CPU"
                 text = f"#{job.id}  [{states.get(job.state, job.state)}]  {job.source_path.name}  →  {job.output_path.name}{detail}"

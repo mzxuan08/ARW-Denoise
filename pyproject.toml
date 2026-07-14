@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "GPL-3.0-or-later"}
 authors = [{name = "ARW Denoise contributors"}]
-dependencies = ["numpy>=1.24", "tifffile>=2024.8"]
+dependencies = ["numpy>=1.24", "tifffile>=2024.8", "psutil==7.2.2"]
 
 [project.optional-dependencies]
 raw = ["rawpy>=0.24"]
