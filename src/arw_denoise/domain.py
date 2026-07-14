@@ -50,7 +50,7 @@ class RawMetadata:
         if self.width <= 0 or self.height <= 0:
             raise UnsupportedRawError("RAW 的可见区域尺寸无效")
         if self.width % 2 or self.height % 2:
-            raise UnsupportedRawError("首版只支持偶数尺寸的 2x2 Bayer RAW")
+            raise UnsupportedRawError("2x2 Bayer RAW 的可见区域必须为偶数尺寸")
         if self.top_margin < 0 or self.left_margin < 0:
             raise UnsupportedRawError("RAW active area 偏移无效")
         if self.top_margin + self.height > self.raw_height or self.left_margin + self.width > self.raw_width:

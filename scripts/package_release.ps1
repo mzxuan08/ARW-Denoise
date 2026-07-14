@@ -1,7 +1,7 @@
 param(
     [string]$Distribution = "dist\ArwDenoise",
     [string]$OutputDirectory = "outputs",
-    [string]$Version = "0.3.1",
+    [string]$Version = "0.4.0",
     [string]$Python = "python",
     [switch]$SkipRuntimeVerification
 )

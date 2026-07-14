@@ -17,6 +17,20 @@ def _bits_for_white_level(white_level: float) -> int:
     return max(8, min(16, int(math.ceil(math.log2(float(white_level) + 1.0)))))
 
 
+def validate_camera_support(
+    metadata: RawMetadata,
+    *,
+    allow_experimental: bool = False,
+) -> None:
+    """Accept Sony models by decoded RAW capability instead of a model allowlist."""
+    metadata.validate()
+    make = " ".join((metadata.make or "").strip().casefold().split())
+    is_sony = make == "sony" or make.startswith("sony ")
+    if not is_sony and not allow_experimental:
+        label = " ".join(value for value in (metadata.make, metadata.model) if value) or "未知机型"
+        raise UnsupportedRawError(f"仅支持 Sony ARW；当前文件为 {label}")
+
+
 class RawPyDecoder:
     """Thin, optional LibRaw/rawpy adapter that preserves the mosaic."""
 
@@ -55,7 +69,7 @@ class RawPyDecoder:
                     raise UnsupportedRawError("dnglab 返回的 RAW 元数据结构不完整") from exc
                 pattern_array = raw.raw_pattern
                 if pattern_array is None or tuple(pattern_array.shape) != (2, 2):
-                    raise UnsupportedRawError("首版仅支持 2x2 Bayer RAW")
+                    raise UnsupportedRawError("仅支持可可靠识别的 2x2 Bayer RAW")
                 pattern = tuple(int(v) for v in pattern_array.reshape(-1))
                 desc = bytes(raw.color_desc).decode("ascii", errors="replace").rstrip("\x00")
                 sizes = raw.sizes
@@ -81,13 +95,10 @@ class RawPyDecoder:
                     aperture=_optional_rational(exif.get("fnumber")),
                     focal_length_mm=_optional_rational(exif.get("focal_length")),
                 )
-                result.validate()
-                make = (result.make or "").strip().lower()
-                model = (result.model or "").strip().upper()
-                supported = "sony" in make and model == "ILCE-7CM2"
-                if not supported and not self.allow_experimental:
-                    label = " ".join(value for value in (result.make, result.model) if value) or "未知机型"
-                    raise UnsupportedRawError(f"首版仅正式支持 Sony ILCE-7CM2；当前文件为 {label}")
+                validate_camera_support(
+                    result,
+                    allow_experimental=self.allow_experimental,
+                )
                 return result
         except UnsupportedRawError:
             raise

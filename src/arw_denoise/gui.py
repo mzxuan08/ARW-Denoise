@@ -402,7 +402,7 @@ def run_gui() -> int:
                 advanced.addWidget(slider)
                 self.sliders[key] = slider
             layout.addWidget(self.advanced_panel)
-            note = QLabel("默认由 ISO 和 RAW 噪声估计自动调节。输出为保留 CFA、白平衡和高光余量的可编辑 DNG。")
+            note = QLabel("自动检测所有 Sony 2×2 Bayer ARW，并按 ISO 和 RAW 噪声估计调节。输出为保留 CFA、白平衡和高光余量的可编辑 DNG。")
             note.setWordWrap(True)
             note.setStyleSheet("color: #777; margin-top: 12px")
             layout.addWidget(note)
