@@ -1,7 +1,7 @@
 param(
     [string]$Distribution = "dist\ArwDenoise",
     [string]$OutputDirectory = "outputs",
-    [string]$Version = "0.5.0",
+    [string]$Version = "0.5.1",
     [string]$Python = "python",
     [ValidateRange(1, 16)]
     [int]$CompressionThreads = 4,

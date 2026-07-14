@@ -7,6 +7,7 @@ import pytest
 from arw_denoise.gui_helpers import (
     explorer_arguments,
     can_preview,
+    create_progress_controller,
     format_duration,
     job_parameters,
     open_in_explorer,
@@ -100,3 +101,15 @@ def test_source_summary_formats_preflight_camera_metadata() -> None:
     }
     assert source_summary(parameters) == "Sony ILCE-7CM2 · ISO 400 · 7032×4688 · 16 bit"
     assert source_summary({}) == ""
+
+
+def test_gui_progress_controller_accepts_job_id_and_emits_progress() -> None:
+    events = []
+    controller = create_progress_controller(42, events.append)
+
+    controller.progress("decoding", 1, 1)
+
+    assert len(events) == 1
+    assert events[0].job_id == 42
+    assert events[0].phase == "decoding"
+    assert events[0].phase_progress == pytest.approx(1.0)

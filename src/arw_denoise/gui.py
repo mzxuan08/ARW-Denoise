@@ -18,6 +18,7 @@ from .dnglab import DngLabClient
 from .gpu_probe import create_default_gpu_probe
 from .gui_helpers import (
     can_preview,
+    create_progress_controller,
     format_duration,
     job_parameters,
     open_in_explorer,
@@ -29,7 +30,7 @@ from .jobs import Job, JobStore
 from .metrics import ResourceMonitor
 from .processor import AutoProcessingSettings, SmartRawProcessor
 from .settings import AppSettings, SettingsStore, resolve_cache_dir, resolve_output_dir
-from .task_control import ProcessingCancelled, ProgressEvent, ProgressTracker, TaskController
+from .task_control import ProcessingCancelled, ProgressEvent, TaskController
 
 
 def run_gui() -> int:
@@ -107,9 +108,7 @@ def run_gui() -> int:
                             )
                             self.updated.emit()
 
-                        control = TaskController(
-                            progress_tracker=ProgressTracker(job.id, on_progress=save_progress)
-                        )
+                        control = create_progress_controller(job.id, save_progress)
                         with self._control_lock:
                             self._current_control = control
                         if self.cancel_requested.is_set():

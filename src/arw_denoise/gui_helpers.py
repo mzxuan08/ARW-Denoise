@@ -5,6 +5,17 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from .settings import AppSettings
+from .task_control import ProgressEvent, ProgressTracker, TaskController
+
+
+def create_progress_controller(
+    job_id: int,
+    on_progress: Callable[[ProgressEvent], None],
+) -> TaskController:
+    """Build the progress controller used by the GUI processing worker."""
+    return TaskController(
+        progress_tracker=ProgressTracker(job_id=job_id, on_progress=on_progress)
+    )
 
 
 def format_duration(seconds: float | None) -> str:
