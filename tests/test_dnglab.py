@@ -9,6 +9,7 @@ import tifffile
 from arw_denoise.dnglab import DngLabClient
 from arw_denoise.domain import ExternalToolError
 from arw_denoise.domain import RawMetadata
+from arw_denoise.task_control import CancellationToken, ProcessingCancelled
 
 
 class FakeDngLab(DngLabClient):
@@ -16,7 +17,7 @@ class FakeDngLab(DngLabClient):
         self.executable = Path("fake-dnglab.exe")
         self.timeout_seconds = 5
 
-    def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
+    def _run(self, *args: str, cancellation=None) -> subprocess.CompletedProcess[str]:
         if args[0] == "convert":
             Path(args[-1]).write_bytes(b"fake dng")
             return subprocess.CompletedProcess(args, 0, "converted", "")
@@ -24,7 +25,7 @@ class FakeDngLab(DngLabClient):
             return subprocess.CompletedProcess(args, 0, "dnglab 0.test", "")
         raise AssertionError(args)
 
-    def analyze(self, path: Path) -> dict:
+    def analyze(self, path: Path, cancellation=None) -> dict:
         assert path.read_bytes() == b"fake dng"
         return {"file": {"valid": True}}
 
@@ -42,7 +43,7 @@ def test_compatibility_convert_is_atomic_and_refuses_overwrite(tmp_path: Path):
 
 
 class FakeCfaDngLab(FakeDngLab):
-    def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
+    def _run(self, *args: str, cancellation=None) -> subprocess.CompletedProcess[str]:
         if args[0] == "convert":
             with tifffile.TiffWriter(args[-1]) as tif:
                 tif.write(
@@ -70,9 +71,9 @@ class FakeCfaDngLab(FakeDngLab):
                     ],
                 )
             return subprocess.CompletedProcess(args, 0, "converted", "")
-        return super()._run(*args)
+        return super()._run(*args, cancellation=cancellation)
 
-    def analyze(self, path: Path) -> dict:
+    def analyze(self, path: Path, cancellation=None) -> dict:
         assert path.stat().st_size > 0
         return {"file": {"valid": True}}
 
@@ -112,3 +113,61 @@ def test_atomic_publish_does_not_overwrite_racing_file(tmp_path: Path):
         DngLabClient._publish_no_overwrite(temporary, output)
     assert output.read_bytes() == b"other process"
     assert temporary.read_bytes() == b"new"
+
+
+def test_running_dnglab_process_is_terminated_when_cancelled(tmp_path: Path):
+    token = CancellationToken()
+
+    class Process:
+        def __init__(self):
+            self.returncode = None
+            self.terminated = False
+            self.killed = False
+
+        def communicate(self, timeout=None):
+            if not self.terminated and not self.killed:
+                token.cancel()
+                raise subprocess.TimeoutExpired("fake", timeout)
+            self.returncode = -15
+            return ("", "")
+
+        def terminate(self):
+            self.terminated = True
+
+        def kill(self):
+            self.killed = True
+
+    process = Process()
+    client = DngLabClient.__new__(DngLabClient)
+    client.executable = tmp_path / "dnglab.exe"
+    client.timeout_seconds = 5
+    client.poll_seconds = 0.01
+    client.popen_factory = lambda *args, **kwargs: process
+
+    with pytest.raises(ProcessingCancelled):
+        client._run("--version", cancellation=token)
+    assert process.terminated is True
+    assert process.killed is False
+
+
+def test_cancelled_conversion_removes_only_its_temporary_file(tmp_path: Path):
+    source = tmp_path / "sample.ARW"
+    source.write_bytes(b"raw")
+    output = tmp_path / "sample.dng"
+    unrelated = tmp_path / ".unrelated.processing.dng"
+    unrelated.write_bytes(b"keep")
+    token = CancellationToken()
+
+    class CancellingDngLab(FakeDngLab):
+        def _run(self, *args: str, cancellation=None):
+            if args[0] == "convert":
+                Path(args[-1]).write_bytes(b"partial")
+                token.cancel()
+                token.check()
+            return super()._run(*args, cancellation=cancellation)
+
+    with pytest.raises(ProcessingCancelled):
+        CancellingDngLab().compatibility_convert(source, output, cancellation=token)
+    assert not output.exists()
+    assert unrelated.read_bytes() == b"keep"
+    assert list(tmp_path.glob(".sample.*.tmp.dng")) == []
