@@ -58,28 +58,30 @@ def _edge_weight(original: np.ndarray, amount: float) -> np.ndarray:
 def _control_chroma(delta: np.ndarray, amount: float) -> np.ndarray:
     if amount <= 0.0:
         return delta
-    controlled = delta.copy()
     green = 0.5 * (delta[:, :, 1] + delta[:, :, 2])
-    controlled[:, :, 0] = (1.0 - amount) * delta[:, :, 0] + amount * green
-    controlled[:, :, 3] = (1.0 - amount) * delta[:, :, 3] + amount * green
-    controlled[:, :, 1] = (1.0 - 0.5 * amount) * delta[:, :, 1] + 0.5 * amount * green
-    controlled[:, :, 2] = (1.0 - 0.5 * amount) * delta[:, :, 2] + 0.5 * amount * green
-    return controlled
+    for channel, mix in ((0, amount), (3, amount), (1, 0.5 * amount), (2, 0.5 * amount)):
+        delta[:, :, channel] *= 1.0 - mix
+        delta[:, :, channel] += mix * green
+    return delta
 
 
 def _suppress_delta_spikes(delta: np.ndarray, amount: float) -> np.ndarray:
     if amount <= 0.0:
         return delta
-    padded = np.pad(delta, ((1, 1), (1, 1), (0, 0)), mode="reflect")
-    neighbors = 0.25 * (
-        padded[:-2, 1:-1]
-        + padded[2:, 1:-1]
-        + padded[1:-1, :-2]
-        + padded[1:-1, 2:]
-    )
     limit = 0.08 * (1.0 - amount) + 0.008
-    limited = neighbors + np.clip(delta - neighbors, -limit, limit)
-    return (1.0 - amount) * delta + amount * limited
+    for channel in range(delta.shape[2]):
+        plane = delta[:, :, channel]
+        padded = np.pad(plane, ((1, 1), (1, 1)), mode="reflect")
+        neighbors = padded[:-2, 1:-1] + padded[2:, 1:-1]
+        neighbors += padded[1:-1, :-2]
+        neighbors += padded[1:-1, 2:]
+        neighbors *= 0.25
+        limited = plane - neighbors
+        np.clip(limited, -limit, limit, out=limited)
+        limited += neighbors
+        plane *= 1.0 - amount
+        plane += amount * limited
+    return delta
 
 
 def _preserve_channel_means(result: np.ndarray, original: np.ndarray) -> np.ndarray:
@@ -87,7 +89,8 @@ def _preserve_channel_means(result: np.ndarray, original: np.ndarray) -> np.ndar
     corrected = result
     for _ in range(2):
         actual = corrected.mean(axis=(0, 1), dtype=np.float64)
-        corrected = np.clip(corrected + (target - actual).astype(np.float32)[None, None, :], 0.0, 1.0)
+        corrected += (target - actual).astype(np.float32)[None, None, :]
+        np.clip(corrected, 0.0, 1.0, out=corrected)
     return corrected.astype(np.float32, copy=False)
 
 
@@ -97,6 +100,7 @@ def postprocess_raw(
     settings: PostprocessSettings,
     *,
     cancellation: CancellationToken | None = None,
+    out: np.ndarray | None = None,
 ) -> np.ndarray:
     settings.validate()
     _validate_images(original, model_output)
@@ -105,8 +109,19 @@ def postprocess_raw(
     source = original.astype(np.float32, copy=False)
     prediction = model_output.astype(np.float32, copy=False)
     if np.array_equal(source, prediction) or settings.strength == 0.0:
-        return source.copy()
-    delta = prediction - source
+        if out is None:
+            return source.copy()
+        if out.shape != source.shape or out.dtype != np.float32 or np.shares_memory(out, source):
+            raise ValueError("后处理输出缓冲无效或与原始 RAW 共享内存")
+        np.copyto(out, source)
+        return out
+    if out is None:
+        delta = np.empty_like(source, dtype=np.float32)
+    else:
+        if out.shape != source.shape or out.dtype != np.float32 or np.shares_memory(out, source):
+            raise ValueError("后处理输出缓冲无效或与原始 RAW 共享内存")
+        delta = out
+    np.subtract(prediction, source, out=delta)
     delta = _control_chroma(delta, settings.chroma_noise)
     if cancellation is not None:
         cancellation.check()
@@ -116,7 +131,10 @@ def postprocess_raw(
     delta *= _edge_weight(source, settings.detail_protection)[:, :, None]
     if cancellation is not None:
         cancellation.check()
-    result = np.clip(source + settings.strength * delta, 0.0, 1.0)
+    delta *= settings.strength
+    delta += source
+    np.clip(delta, 0.0, 1.0, out=delta)
+    result = delta
     result = _preserve_channel_means(result, source)
     if cancellation is not None:
         cancellation.check()

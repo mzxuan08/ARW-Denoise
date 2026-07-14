@@ -78,6 +78,18 @@ def test_postprocess_preserves_channel_means_and_safe_range() -> None:
     assert float(result.max()) <= 1.0
 
 
+def test_postprocess_can_reuse_model_output_without_touching_original() -> None:
+    rng = np.random.default_rng(21)
+    original = rng.uniform(0.1, 0.8, (40, 48, 4)).astype(np.float32)
+    model = np.clip(original * 0.92 + 0.02, 0.0, 1.0).astype(np.float32)
+    expected = postprocess_raw(original, model, PostprocessSettings())
+    original_before = original.copy()
+    result = postprocess_raw(original, model, PostprocessSettings(), out=model)
+    assert result is model
+    np.testing.assert_allclose(result, expected, atol=2e-7)
+    np.testing.assert_array_equal(original, original_before)
+
+
 @pytest.mark.parametrize(
     "settings",
     [

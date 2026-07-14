@@ -255,6 +255,7 @@ class SmartRawProcessor:
                     model_result.packed,
                     post,
                     cancellation=control.cancellation,
+                    out=model_result.packed,
                 )
                 denoised = DenoiseResult(
                     packed=processed,
@@ -269,6 +270,7 @@ class SmartRawProcessor:
 
         control.progress("denoising", 1, 1)
         control.progress("postprocessing", 1, 1)
+        del packed
         restored = unpack_normalized_bayer(denoised.packed, context, reference_pixels=frame.pixels)
         if on_phase:
             on_phase("writing")

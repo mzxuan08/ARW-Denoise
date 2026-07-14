@@ -69,6 +69,25 @@ def test_tiled_inference_reports_progress():
     assert [item[0] for item in progress] == list(range(1, progress[-1][1] + 1))
 
 
+def test_tiled_inference_reuses_caller_buffers() -> None:
+    image = np.random.default_rng(12).random((80, 96, 4), dtype=np.float32)
+    output = np.empty_like(image)
+    weights = np.empty(image.shape[:2], dtype=np.float32)
+    result = tiled_inference(
+        image, lambda tile: tile.copy(), tile_size=48, overlap=8,
+        output_buffer=output, weights_buffer=weights,
+    )
+    assert result is output
+    np.testing.assert_allclose(result, image, atol=1e-6)
+    assert np.all(weights > 0)
+
+
+def test_tiled_inference_rejects_aliasing_output_buffer() -> None:
+    image = np.zeros((80, 80, 4), np.float32)
+    with pytest.raises(ValueError, match="共享内存"):
+        tiled_inference(image, lambda tile: tile, tile_size=48, overlap=8, output_buffer=image)
+
+
 def test_tiled_inference_stops_before_start_when_cancelled():
     token = CancellationToken()
     token.cancel()
